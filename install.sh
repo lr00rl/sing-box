@@ -104,7 +104,81 @@ load() {
 # wget add --no-check-certificate
 _wget() {
     [[ $proxy ]] && export https_proxy=$proxy
-    wget --no-check-certificate $*
+    wget --no-check-certificate "$@"
+}
+
+normalize_addr() {
+    local addr=$1
+    [[ $addr == \[*\] ]] && addr=${addr:1:${#addr}-2}
+    echo "$addr"
+}
+
+is_valid_ipv4() {
+    local addr=$1 octet
+    [[ $addr =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS=. read -r -a octets <<<"$addr"
+    for octet in "${octets[@]}"; do
+        ((octet >= 0 && octet <= 255)) || return 1
+    done
+}
+
+is_valid_ipv6() {
+    local addr
+    addr=$(normalize_addr "$1")
+    [[ $addr == *:* && $addr =~ ^[0-9A-Fa-f:]+$ ]]
+}
+
+is_valid_domain() {
+    [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
+}
+
+is_valid_addr() {
+    local addr
+    addr=$(normalize_addr "$1")
+    is_valid_ipv4 "$addr" || is_valid_ipv6 "$addr" || is_valid_domain "$addr"
+}
+
+get_public_ip() {
+    local family=$1 candidate url
+    local -a urls
+    case $family in
+    4)
+        urls=(
+            https://api.ipify.org
+            https://ipv4.icanhazip.com
+            https://checkip.amazonaws.com
+            https://ifconfig.me/ip
+            https://ip.sb
+        )
+        ;;
+    6)
+        urls=(
+            https://api64.ipify.org
+            https://ipv6.icanhazip.com
+            https://ifconfig.me/ip
+            https://ip.sb
+        )
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+    for url in "${urls[@]}"; do
+        candidate=$(_wget -"${family}" -T 3 -t 1 -qO- "$url" 2>/dev/null | tr -d '\r' | sed -n '1{s/[[:space:]]//gp;q}')
+        [[ ! $candidate ]] && continue
+        if [[ $family == 4 ]]; then
+            is_valid_ipv4 "$candidate" && {
+                echo "$candidate"
+                return 0
+            }
+        else
+            is_valid_ipv6 "$candidate" && {
+                echo "$candidate"
+                return 0
+            }
+        fi
+    done
+    return 1
 }
 
 # print a mesage
@@ -126,7 +200,8 @@ msg() {
 
 # show help msg
 show_help() {
-    echo -e "Usage: $0 [-f xxx | -l | -p xxx | -v xxx | -h]"
+    echo -e "Usage: $0 [options]"
+    echo -e "  -a, --server-addr <addr>        使用指定的 IP 或域名作为连接地址, e.g., -a 1.2.3.4 or -a example.com"
     echo -e "  -f, --core-file <path>          自定义 $is_core_name 文件路径, e.g., -f /root/$is_core-linux-amd64.tar.gz"
     echo -e "  -l, --local-install             本地获取安装脚本, 使用当前目录"
     echo -e "  -p, --proxy <addr>              使用代理下载, e.g., -p http://127.0.0.1:2333"
@@ -200,8 +275,15 @@ download() {
 
 # get server ip
 get_ip() {
-    export "$(_wget -4 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
-    [[ -z $ip ]] && export "$(_wget -6 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
+    [[ $ip ]] && return
+    if [[ $server_addr ]]; then
+        server_addr=$(normalize_addr "$server_addr")
+        is_valid_addr "$server_addr" || err "($server_addr) 不是一个有效的 IP 或域名."
+        ip=$server_addr
+        return
+    fi
+    ip=$(get_public_ip 4)
+    [[ ! $ip ]] && ip=$(get_public_ip 6)
 }
 
 # check background tasks status
@@ -253,6 +335,14 @@ check_status() {
 pass_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
+        -a | --server-addr | --addr)
+            [[ -z $2 ]] && {
+                err "($1) 缺少必需参数, 正确使用示例: [$1 1.2.3.4 or $1 example.com]"
+            }
+            server_addr=$(normalize_addr "$2")
+            is_valid_addr "$server_addr" || err "($server_addr) 不是一个有效的 IP 或域名."
+            shift 2
+            ;;
         -f | --core-file)
             [[ -z $2 ]] && {
                 err "($1) 缺少必需参数, 正确使用示例: [$1 /root/$is_core-linux-amd64.tar.gz]"
@@ -331,6 +421,7 @@ main() {
     msg warn "开始安装..."
     [[ $is_core_ver ]] && msg warn "${is_core_name} 版本: ${yellow}$is_core_ver${none}"
     [[ $proxy ]] && msg warn "使用代理: ${yellow}$proxy${none}"
+    [[ $server_addr ]] && msg warn "连接地址: ${yellow}$server_addr${none}"
     # create tmpdir
     mkdir -p $tmpdir
     # if is_core_file, copy file
@@ -398,6 +489,7 @@ main() {
     # get server ip.
     [[ ! $ip ]] && {
         msg err "获取服务器 IP 失败."
+        msg err "请使用 ${yellow}--server-addr <IP|domain>${none} 手动指定连接地址."
         exit_and_del_tmpdir
     }
 
@@ -449,6 +541,7 @@ main() {
     mkdir -p $is_conf_dir
 
     load core.sh
+    [[ $server_addr ]] && is_custom_addr=$server_addr
     # create a reality config
     add reality
     # wait for background tasks (e.g., OpenRC service start)

@@ -27,6 +27,7 @@ show_help() {
             "更改:"
             # "   dp, dynamicport [name] [start | auto] [end]     更改动态端口"
             "   full [name] [...]                               更改多个参数"
+            "   addr [name] [ip | domain | auto]                更改连接地址"
             "   id [name] [uuid | auto]                         更改 UUID"
             "   host [name] [domain]                            更改域名"
             "   port [name] [port | auto]                       更改端口"

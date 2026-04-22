@@ -45,6 +45,13 @@
 
 安装及使用：https://233boy.com/sing-box/sing-box-script/
 
+本项目基于 [xykt/IPQuality](https://github.com/xykt/IPQuality) 进行了调整，主要解决部分机器在安装阶段无法正常获取 IP 的问题，并支持传入自定义 IP 或域名作为连接地址。
+
+安装时如果自动获取 IP 失败，或你希望直接指定连接地址，可执行：
+
+- `bash install.sh --server-addr 1.2.3.4`
+- `bash install.sh --server-addr example.com`
+
 # 帮助
 
 使用：`sing-box help`
@@ -70,6 +77,7 @@ Usage: sing-box [options]... [args]...
    log                                             查看日志
 更改:
    full [name] [...]                               更改多个参数
+   addr [name] [ip | domain | auto]                更改连接地址
    id [name] [uuid | auto]                         更改 UUID
    host [name] [domain]                            更改域名
    port [name] [port | auto]                       更改端口

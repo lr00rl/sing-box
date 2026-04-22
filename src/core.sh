@@ -83,6 +83,7 @@ change_list=(
     "更改 SNI (serverName)"
     "更改伪装网站"
     "更改用户名 (Username)"
+    "更改连接地址"
 )
 servername_list=(
     www.amazon.com
@@ -130,10 +131,152 @@ get_uuid() {
     tmp_uuid=$(cat /proc/sys/kernel/random/uuid)
 }
 
+normalize_addr() {
+    local addr=$1
+    [[ $addr == \[*\] ]] && addr=${addr:1:${#addr}-2}
+    echo "$addr"
+}
+
+is_valid_ipv4() {
+    local addr=$1 octet
+    [[ $addr =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS=. read -r -a octets <<<"$addr"
+    for octet in "${octets[@]}"; do
+        ((octet >= 0 && octet <= 255)) || return 1
+    done
+}
+
+is_valid_ipv6() {
+    local addr
+    addr=$(normalize_addr "$1")
+    [[ $addr == *:* && $addr =~ ^[0-9A-Fa-f:]+$ ]]
+}
+
+is_valid_domain() {
+    [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
+}
+
+is_valid_addr() {
+    local addr
+    addr=$(normalize_addr "$1")
+    is_valid_ipv4 "$addr" || is_valid_ipv6 "$addr" || is_valid_domain "$addr"
+}
+
+get_public_ip() {
+    local family=$1 candidate url
+    local -a urls
+    case $family in
+    4)
+        urls=(
+            https://api.ipify.org
+            https://ipv4.icanhazip.com
+            https://checkip.amazonaws.com
+            https://ifconfig.me/ip
+            https://ip.sb
+        )
+        ;;
+    6)
+        urls=(
+            https://api64.ipify.org
+            https://ipv6.icanhazip.com
+            https://ifconfig.me/ip
+            https://ip.sb
+        )
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+    for url in "${urls[@]}"; do
+        candidate=$(_wget -"${family}" -T 3 -t 1 -qO- "$url" 2>/dev/null | tr -d '\r' | sed -n '1{s/[[:space:]]//gp;q}')
+        [[ ! $candidate ]] && continue
+        if [[ $family == 4 ]]; then
+            is_valid_ipv4 "$candidate" && {
+                echo "$candidate"
+                return 0
+            }
+        else
+            is_valid_ipv6 "$candidate" && {
+                echo "$candidate"
+                return 0
+            }
+        fi
+    done
+    return 1
+}
+
+get_host_dns_result() {
+    local dns_type=$1 result url
+    local -a dns_urls=(
+        "https://dns.google/resolve?name=$host&type=$dns_type"
+        "https://cloudflare-dns.com/dns-query?name=$host&type=$dns_type"
+        "https://dns.quad9.net/dns-query?name=$host&type=$dns_type"
+    )
+    if [[ $(type -P getent) ]]; then
+        case $dns_type in
+        a)
+            result=$(getent hosts "$host" 2>/dev/null | awk '/^[0-9.]+[[:space:]]/{print $1}' | sort -u)
+            ;;
+        aaaa)
+            result=$(getent hosts "$host" 2>/dev/null | awk '/:/{print $1}' | sort -u)
+            ;;
+        esac
+        [[ $result ]] && {
+            echo "$result"
+            return 0
+        }
+    fi
+    for url in "${dns_urls[@]}"; do
+        if [[ $url == *"/dns-query"* ]]; then
+            result=$(_wget -qO- --header="accept: application/dns-json" "$url" 2>/dev/null)
+        else
+            result=$(_wget -qO- "$url" 2>/dev/null)
+        fi
+        [[ $result ]] && {
+            echo "$result"
+            return 0
+        }
+    done
+    return 1
+}
+
+config_addr_file() {
+    local config_name=${1:-$is_config_name}
+    echo "$is_conf_dir/${config_name%.json}.addr"
+}
+
+load_config_addr() {
+    local addr_file
+    unset is_custom_addr
+    addr_file=$(config_addr_file "$1")
+    [[ ! -f $addr_file ]] && return
+    read -r is_custom_addr <"$addr_file"
+    is_custom_addr=$(normalize_addr "$is_custom_addr")
+    [[ $(is_test addr "$is_custom_addr") ]] || unset is_custom_addr
+}
+
+save_config_addr() {
+    local addr_file
+    addr_file=$(config_addr_file "$1")
+    if [[ $is_custom_addr ]]; then
+        is_custom_addr=$(normalize_addr "$is_custom_addr")
+        [[ $(is_test addr "$is_custom_addr") ]] || err "连接地址 ($is_custom_addr) 无效."
+        echo "$is_custom_addr" >"$addr_file"
+    else
+        rm -f "$addr_file"
+    fi
+}
+
 get_ip() {
     [[ $ip || $is_no_auto_tls || $is_gen || $is_dont_get_ip ]] && return
-    export "$(_wget -4 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
-    [[ ! $ip ]] && export "$(_wget -6 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
+    if [[ $server_addr ]]; then
+        server_addr=$(normalize_addr "$server_addr")
+        [[ $(is_test addr "$server_addr") ]] || err "连接地址 ($server_addr) 无效."
+        ip=$server_addr
+        return
+    fi
+    ip=$(get_public_ip 4)
+    [[ ! $ip ]] && ip=$(get_public_ip 6)
     [[ ! $ip ]] && {
         err "获取服务器 IP 失败.."
     }
@@ -185,7 +328,10 @@ is_test() {
         [[ $(is_port_used $2) && ! $is_cant_test_port ]] && echo ok
         ;;
     domain)
-        echo $2 | grep -E -i '^\w(\w|\-|\.)?+\.\w+$'
+        is_valid_domain "$2" && echo ok
+        ;;
+    addr)
+        is_valid_addr "$2" && echo ok
         ;;
     path)
         echo $2 | grep -E -i '^\/\w(\w|\-|\/)?+\w$'
@@ -346,6 +492,7 @@ create() {
         [[ $is_config_file ]] && is_no_del_msg=1 && del $is_config_file
         # save json to file
         cat <<<$is_new_json >$is_json_file
+        save_config_addr "$is_config_name"
         if [[ $is_new_install ]]; then
             # config.json
             create config.json
@@ -438,6 +585,9 @@ change() {
             ;;
         web | proxy-site)
             is_change_id=11
+            ;;
+        addr | address)
+            is_change_id=13
             ;;
         *)
             [[ $is_try_change ]] && return
@@ -647,6 +797,22 @@ change() {
         ask string is_socks_user "请输入新用户名 (Username):"
         add $net
         ;;
+    13)
+        # new connect addr
+        is_new_addr=$3
+        [[ $is_protocol == 'anytls' && $is_anytls_domain ]] && err "($is_config_file) 不支持更改连接地址."
+        [[ $is_auto ]] && unset is_new_addr is_custom_addr
+        if [[ ! $is_auto && ! $is_new_addr ]]; then
+            ask string is_new_addr "请输入新的连接地址 (IP 或域名, auto 为自动获取):"
+        fi
+        [[ ${is_new_addr,,} == 'auto' ]] && is_auto=1 && unset is_new_addr is_custom_addr
+        if [[ ! $is_auto ]]; then
+            is_new_addr=$(normalize_addr "$is_new_addr")
+            [[ $(is_test addr "$is_new_addr") ]] || err "请输入正确的 IP 或域名."
+            is_custom_addr=$is_new_addr
+        fi
+        add $net
+        ;;
     esac
 }
 
@@ -663,6 +829,7 @@ del() {
             pause
         fi
         rm -rf $is_conf_dir/"$is_config_file"
+        rm -f "$(config_addr_file "$is_config_file")"
         [[ ! $is_new_json ]] && manage restart &
         [[ ! $is_no_del_msg ]] && _green "\n已删除: $is_config_file\n"
 
@@ -1083,11 +1250,12 @@ add() {
 get() {
     case $1 in
     addr)
-        is_addr=$host
+        is_addr=$is_custom_addr
+        [[ ! $is_addr ]] && is_addr=$host
         [[ ! $is_addr ]] && {
             get_ip
             is_addr=$ip
-            [[ $(grep ":" <<<$ip) ]] && is_addr="[$ip]"
+            is_valid_ipv6 "$ip" && is_addr="[$ip]"
         }
         ;;
     new)
@@ -1130,6 +1298,7 @@ get() {
                 net_type+=reality
                 is_public_key=${is_public_key/public_key_/}
             fi
+            load_config_addr "$is_config_file"
             is_socks_user=$username
             is_socks_pass=$password
 
@@ -1275,12 +1444,12 @@ get() {
         [[ $is_no_auto_tls || $is_gen || $is_dont_test_host ]] && return
         get_ip
         get ping
-        if [[ ! $(grep $ip <<<$is_host_dns) ]]; then
+        if ! grep -F "$ip" <<<$is_host_dns &>/dev/null; then
             msg "\n请将 ($(_red_bg $host)) 解析到 ($(_red_bg $ip))"
             msg "\n如果使用 Cloudflare, 在 DNS 那; 关闭 (Proxy status / 代理状态), 即是 (DNS only / 仅限 DNS)"
             ask string y "我已经确定解析 [y]:"
             get ping
-            if [[ ! $(grep $ip <<<$is_host_dns) ]]; then
+            if ! grep -F "$ip" <<<$is_host_dns &>/dev/null; then
                 _cyan "\n测试结果: $is_host_dns"
                 err "域名 ($host) 没有解析到 ($ip)"
             fi
@@ -1298,8 +1467,8 @@ get() {
         # [[ $(grep ":" <<<$ip) ]] && is_ip_type="-6"
         # is_host_dns=$(ping $host $is_ip_type -c 1 -W 2 | head -1)
         is_dns_type="a"
-        [[ $(grep ":" <<<$ip) ]] && is_dns_type="aaaa"
-        is_host_dns=$(_wget -qO- --header="accept: application/dns-json" "https://one.one.one.one/dns-query?name=$host&type=$is_dns_type")
+        is_valid_ipv6 "$ip" && is_dns_type="aaaa"
+        is_host_dns=$(get_host_dns_result "$is_dns_type")
         ;;
     install-caddy)
         _green "\n安装 Caddy 实现自动配置 TLS.\n"
@@ -1365,7 +1534,7 @@ info() {
     ws | tcp | h2 | quic | http*)
         if [[ $host ]]; then
             is_color=45
-            is_can_change=(0 1 2 3 5)
+            is_can_change=(0 1 2 3 5 13)
             is_info_show=(0 1 2 3 4 6 7 8)
             [[ $is_protocol == 'vmess' ]] && {
                 is_vmess_url=$(jq -c '{v:2,ps:'\"233boy-$net-$host\"',add:'\"$is_addr\"',port:'\"$is_https_port\"',id:'\"$uuid\"',aid:"0",net:'\"$net\"',host:'\"$host\"',path:'\"$path\"',tls:'\"tls\"'}' <<<{})
@@ -1374,16 +1543,16 @@ info() {
                 [[ $is_protocol == "trojan" ]] && {
                     uuid=$password
                     # is_info_str=($is_protocol $is_addr $is_https_port $password $net $host $path 'tls')
-                    is_can_change=(0 1 2 3 4)
+                    is_can_change=(0 1 2 3 4 13)
                     is_info_show=(0 1 2 10 4 6 7 8)
                 }
-                is_url="$is_protocol://$uuid@$host:$is_https_port?encryption=none&security=tls&type=$net&host=$host&path=$path#233boy-$net-$host"
+                is_url="$is_protocol://$uuid@$is_addr:$is_https_port?encryption=none&security=tls&type=$net&host=$host&path=$path#233boy-$net-$host"
             }
             [[ $is_caddy ]] && is_can_change+=(11)
             is_info_str=($is_protocol $is_addr $is_https_port $uuid $net $host $path 'tls')
         else
             is_type=none
-            is_can_change=(0 1 5)
+            is_can_change=(0 1 5 13)
             is_info_show=(0 1 2 3 4)
             is_info_str=($is_protocol $is_addr $port $uuid $net)
             [[ $net == "http" ]] && {
@@ -1404,34 +1573,34 @@ info() {
         fi
         ;;
     ss)
-        is_can_change=(0 1 4 6)
+        is_can_change=(0 1 4 6 13)
         is_info_show=(0 1 2 10 11)
         is_url="ss://$(echo -n ${ss_method}:${ss_password} | base64 -w 0)@${is_addr}:${port}#233boy-$net-${is_addr}"
         is_info_str=($is_protocol $is_addr $port $ss_password $ss_method)
         ;;
     trojan)
         is_insecure=1
-        is_can_change=(0 1 4)
+        is_can_change=(0 1 4 13)
         is_info_show=(0 1 2 10 4 8 20)
         is_url="$is_protocol://$password@$is_addr:$port?type=tcp&security=tls&allowInsecure=1#233boy-$net-$is_addr"
         is_info_str=($is_protocol $is_addr $port $password tcp tls true)
         ;;
     hy*)
-        is_can_change=(0 1 4)
+        is_can_change=(0 1 4 13)
         is_info_show=(0 1 2 10 8 9 20)
         is_url="$is_protocol://$password@$is_addr:$port?alpn=h3&insecure=1#233boy-$net-$is_addr"
         is_info_str=($is_protocol $is_addr $port $password tls h3 true)
         ;;
     tuic)
         is_insecure=1
-        is_can_change=(0 1 4 5)
+        is_can_change=(0 1 4 5 13)
         is_info_show=(0 1 2 3 10 8 9 20 21)
         is_url="$is_protocol://$uuid:$password@$is_addr:$port?alpn=h3&allow_insecure=1&congestion_control=bbr#233boy-$net-$is_addr"
         is_info_str=($is_protocol $is_addr $port $uuid $password tls h3 true bbr)
         ;;
     reality)
         is_color=41
-        is_can_change=(0 1 5 9 10)
+        is_can_change=(0 1 5 9 10 13)
         is_info_show=(0 1 2 3 15 4 8 16 17 18)
         is_flow=xtls-rprx-vision
         is_net_type=tcp
@@ -1451,18 +1620,19 @@ info() {
             is_url="anytls://$password@$is_anytls_domain:$port#233boy-$net-$is_anytls_domain"
         else
             is_insecure=1
+            is_can_change+=(13)
             is_info_show=(0 1 2 10 8 20)
             is_info_str=($is_protocol $is_addr $port $password tls true)
             is_url="anytls://$password@$is_addr:$port?allowInsecure=1#233boy-$net-$is_addr"
         fi
         ;;
     direct)
-        is_can_change=(0 1 7 8)
+        is_can_change=(0 1 7 8 13)
         is_info_show=(0 1 2 13 14)
         is_info_str=($is_protocol $is_addr $port $door_addr $door_port)
         ;;
     socks)
-        is_can_change=(0 1 12 4)
+        is_can_change=(0 1 12 4 13)
         is_info_show=(0 1 2 19 10)
         is_info_str=($is_protocol $is_addr $port $is_socks_user $is_socks_pass)
         is_url="socks://$(echo -n ${is_socks_user}:${is_socks_pass} | base64 -w 0)@${is_addr}:${port}#233boy-$net-${is_addr}"
