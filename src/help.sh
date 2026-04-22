@@ -9,6 +9,8 @@ show_help() {
         msg "Usage: $is_core [options]... [args]... "
         msg
         help_info=(
+            "选项:"
+            "   --addr, --server-addr <ip|domain>               为当前命令指定连接地址\n"
             "基本:"
             "   v, version                                      显示当前版本"
             "   ip                                              返回当前主机的 IP"

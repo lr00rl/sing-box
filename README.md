@@ -52,6 +52,13 @@
 - `bash install.sh --server-addr 1.2.3.4`
 - `bash install.sh --server-addr example.com`
 
+脚本运行时也支持临时指定连接地址，例如：
+
+- `sb --addr 1.2.3.4 add reality 40572`
+- `sb --addr example.com`
+
+如果在交互式添加配置时自动获取 IP 失败，脚本现在也会提示手动输入连接地址继续创建。
+
 # 帮助
 
 使用：`sing-box help`

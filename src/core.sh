@@ -267,16 +267,30 @@ save_config_addr() {
     fi
 }
 
-get_ip() {
+ask_custom_addr() {
+    ask string server_addr "自动获取失败, 请输入连接地址 (IP 或域名):"
+    server_addr=$(normalize_addr "$server_addr")
+    [[ $(is_test addr "$server_addr") ]] || err "请输入正确的 IP 或域名."
+    ip=$server_addr
+    is_custom_addr=$server_addr
+}
+
+detect_ip() {
     [[ $ip || $is_no_auto_tls || $is_gen || $is_dont_get_ip ]] && return
     if [[ $server_addr ]]; then
         server_addr=$(normalize_addr "$server_addr")
         [[ $(is_test addr "$server_addr") ]] || err "连接地址 ($server_addr) 无效."
         ip=$server_addr
+        is_custom_addr=$server_addr
         return
     fi
     ip=$(get_public_ip 4)
     [[ ! $ip ]] && ip=$(get_public_ip 6)
+    [[ $ip ]]
+}
+
+get_ip() {
+    detect_ip && return
     [[ ! $ip ]] && {
         err "获取服务器 IP 失败.."
     }
@@ -1259,7 +1273,11 @@ get() {
         }
         ;;
     new)
-        [[ ! $host ]] && get_ip
+        [[ ! $host ]] && {
+            detect_ip || {
+                [[ -t 0 ]] && ask_custom_addr || err "获取服务器 IP 失败.."
+            }
+        }
         [[ ! $port ]] && get_port && port=$tmp_port
         [[ ! $uuid ]] && get_uuid && uuid=$tmp_uuid
         ;;
@@ -1762,6 +1780,34 @@ update() {
     [[ $is_update_name != 'sh' ]] && manage restart $is_update_name &
 }
 
+pass_args() {
+    is_args=()
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+        -A | --server-addr | --addr)
+            [[ -z $2 ]] && {
+                err "($1) 缺少必需参数, 正确使用示例: [$is_core --addr 1.2.3.4 add reality or $is_core --addr example.com]"
+            }
+            server_addr=$(normalize_addr "$2")
+            [[ $(is_test addr "$server_addr") ]] || err "($server_addr) 不是一个有效的 IP 或域名."
+            is_custom_addr=$server_addr
+            shift 2
+            ;;
+        --)
+            shift
+            while [[ $# -gt 0 ]]; do
+                is_args+=("$1")
+                shift
+            done
+            ;;
+        *)
+            is_args+=("$1")
+            shift
+            ;;
+        esac
+    done
+}
+
 # main menu; if no prefer args.
 is_main_menu() {
     msg "\n------------- $is_core_name script $is_sh_ver by $author -------------"
@@ -1833,6 +1879,11 @@ is_main_menu() {
 
 # check prefer args, if not exist prefer args and show main menu
 main() {
+    [[ $# -gt 0 ]] && {
+        pass_args "$@"
+        set -- "${is_args[@]}"
+    }
+    [[ ! $1 ]] && set -- main
     case $1 in
     a | add | gen | no-auto-tls)
         [[ $1 == 'gen' ]] && is_gen=1
