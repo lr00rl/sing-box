@@ -47,6 +47,16 @@
 
 本项目基于 [xykt/IPQuality](https://github.com/xykt/IPQuality) 进行了调整，主要解决部分机器在安装阶段无法正常获取 IP 的问题，并支持传入自定义 IP 或域名作为连接地址。
 
+远程安装请使用 raw 地址，不要使用 GitHub 的 `blob` 页面地址。
+
+标准安装命令：
+
+- `bash <(curl -fsSL https://raw.githubusercontent.com/lr00rl/sing-box/main/install.sh)`
+- `bash <(curl -fsSL https://raw.githubusercontent.com/lr00rl/sing-box/main/install.sh) --server-addr 1.2.3.4`
+- `bash <(curl -fsSL https://raw.githubusercontent.com/lr00rl/sing-box/main/install.sh) --server-addr example.com`
+
+如果仓库 Release 中不存在 `code.tar.gz`，远程安装会在下载脚本包时失败；这种情况下可先下载源码后使用本地模式安装：`bash install.sh -l`
+
 安装时如果自动获取 IP 失败，或你希望直接指定连接地址，可执行：
 
 - `bash install.sh --server-addr 1.2.3.4`
