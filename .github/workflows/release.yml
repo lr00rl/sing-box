@@ -1,31 +1,58 @@
-name: Main
+name: Release Script Package
 
-on: push
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
     steps:
-      - name: checkout
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: get ver
+
+      - name: Read Script Version
+        id: version
+        shell: bash
         run: |
-          echo "$(cat *.sh | grep is_sh_ver=)" >> $GITHUB_ENV
-          echo "old=$(git tag | tail -n1)" >> $GITHUB_ENV
-      # - name: test
-      #   if: env.is_sh_ver == env.old 
-      #   run: |
-      #     echo not found new version.
-      #     exit 1
-      - name: tar
-        run: tar zcvf code.tar.gz ./*
-      - name: release
-        uses: softprops/action-gh-release@v1
+          set -euo pipefail
+          version=$(sed -n 's/^is_sh_ver=//p' sing-box.sh | head -n1)
+          if [[ -z "${version}" ]]; then
+            echo "is_sh_ver not found in sing-box.sh" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build Release Archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --output=code.tar.gz HEAD
+
+      - name: Publish Release
+        uses: ncipollo/release-action@v1
         with:
-          files: code.tar.gz
-          tag_name: ${{ env.is_sh_ver }}
+          allowUpdates: true
+          artifactErrorsFailBuild: true
+          artifacts: code.tar.gz
+          body: |
+            Auto-updated script package for `${{ steps.version.outputs.version }}`.
+
+            Commit: `${{ github.sha }}`
+          generateReleaseNotes: true
+          makeLatest: true
+          name: ${{ steps.version.outputs.version }}
+          removeArtifacts: true
+          replacesArtifacts: true
+          tag: ${{ steps.version.outputs.version }}

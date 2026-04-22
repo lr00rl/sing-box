@@ -1,7 +1,7 @@
 #!/bin/bash
 
 author=233boy
-# github=https://github.com/233boy/sing-box
+# github=https://github.com/lr00rl/sing-box
 
 # bash fonts colors
 red='\e[31m'
@@ -70,7 +70,7 @@ is_conf_dir=$is_core_dir/conf
 is_log_dir=/var/log/$is_core
 is_sh_bin=/usr/local/bin/$is_core
 is_sh_dir=$is_core_dir/sh
-is_sh_repo=lr00rl/IPQuality
+is_sh_repo=lr00rl/sing-box
 is_pkg="wget tar bash"
 # Alpine: gcompat provides glibc compatibility for prebuilt binaries
 [[ $cmd =~ apk ]] && is_pkg="$is_pkg gcompat jq"

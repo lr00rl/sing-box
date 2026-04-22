@@ -59,6 +59,12 @@
 
 如果在交互式添加配置时自动获取 IP 失败，脚本现在也会提示手动输入连接地址继续创建。
 
+发布说明：
+
+- 仓库发布源使用 `lr00rl/sing-box`
+- GitHub Actions 会在 `main` 分支 push 后自动刷新当前版本号对应的 Release，并更新 `code.tar.gz`
+- 如果希望已安装机器通过 `sb update sh` 检测到新版本，请同步更新 `sing-box.sh` 中的 `is_sh_ver`
+
 # 帮助
 
 使用：`sing-box help`
@@ -125,6 +131,6 @@ Usage: sing-box [options]... [args]...
    h, help                                         显示此帮助界面
 
 谨慎使用 del, ddel, 此选项会直接删除配置; 无需确认
-反馈问题) https://github.com/233boy/sing-box/issues
+反馈问题) https://github.com/lr00rl/sing-box/issues
 文档(doc) https://233boy.com/sing-box/sing-box-script/
 ```
