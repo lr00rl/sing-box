@@ -227,6 +227,19 @@ is_valid_addr() {
     is_valid_ipv4 "$addr" || is_valid_ipv6 "$addr" || is_valid_domain "$addr"
 }
 
+fetch_public_ip_direct() {
+    local family=$1 url=$2
+
+    (
+        unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+        if [[ $(type -P curl) ]]; then
+            curl -fsSL -"${family}" --noproxy '*' --connect-timeout 5 --max-time 10 "$url"
+        else
+            wget --no-check-certificate -"${family}" -T 5 -t 1 -qO- "$url"
+        fi
+    )
+}
+
 get_public_ip() {
     local family=$1 candidate url
     local -a urls
@@ -253,7 +266,7 @@ get_public_ip() {
         ;;
     esac
     for url in "${urls[@]}"; do
-        candidate=$(_wget -"${family}" -T 3 -t 1 -qO- "$url" 2>/dev/null | tr -d '\r' | sed -n '1{s/[[:space:]]//gp;q}')
+        candidate=$(fetch_public_ip_direct "$family" "$url" 2>/dev/null | tr -d '\r' | sed -n '1{s/[[:space:]]//gp;q}')
         [[ ! $candidate ]] && continue
         if [[ $family == 4 ]]; then
             is_valid_ipv4 "$candidate" && {
