@@ -101,9 +101,98 @@ load() {
     . $is_sh_dir/src/$1
 }
 
+# set proxy env for download tools and package managers.
+set_proxy_env() {
+    [[ ! $proxy ]] && return
+    export http_proxy=$proxy
+    export https_proxy=$proxy
+    export all_proxy=$proxy
+    export HTTP_PROXY=$proxy
+    export HTTPS_PROXY=$proxy
+    export ALL_PROXY=$proxy
+}
+
+# curl wrapper for SOCKS proxies, because common wget builds do not support them.
+_curl_from_wget_args() {
+    local retry=3 timeout= output= url= ip_version= arg
+    local curl_args=(-fsSL)
+
+    while [[ $# -gt 0 ]]; do
+        arg=$1
+        case $arg in
+        -q | -c)
+            shift
+            ;;
+        -qO-)
+            output=-
+            shift
+            ;;
+        -O)
+            output=$2
+            shift 2
+            ;;
+        -O*)
+            output=${arg#-O}
+            shift
+            ;;
+        -t)
+            retry=$2
+            shift 2
+            ;;
+        -t*)
+            retry=${arg#-t}
+            shift
+            ;;
+        -T)
+            timeout=$2
+            shift 2
+            ;;
+        -T*)
+            timeout=${arg#-T}
+            shift
+            ;;
+        -4 | -6)
+            ip_version=$arg
+            shift
+            ;;
+        --header=*)
+            curl_args+=(-H "${arg#--header=}")
+            shift
+            ;;
+        --header)
+            curl_args+=(-H "$2")
+            shift 2
+            ;;
+        http://* | https://*)
+            url=$arg
+            shift
+            ;;
+        *)
+            return 2
+            ;;
+        esac
+    done
+
+    [[ $url ]] || return 2
+    curl_args+=(--retry "$retry")
+    [[ $timeout ]] && curl_args+=(--connect-timeout "$timeout")
+    [[ $proxy ]] && curl_args+=(--proxy "$proxy")
+    [[ $ip_version ]] && curl_args+=("$ip_version")
+
+    if [[ $output && $output != "-" ]]; then
+        curl "${curl_args[@]}" "$url" -o "$output"
+    else
+        curl "${curl_args[@]}" "$url"
+    fi
+}
+
 # wget add --no-check-certificate
 _wget() {
-    [[ $proxy ]] && export https_proxy=$proxy
+    set_proxy_env
+    if [[ $proxy == socks* && $(type -P curl) ]]; then
+        _curl_from_wget_args "$@"
+        return $?
+    fi
     wget --no-check-certificate "$@"
 }
 
@@ -204,7 +293,7 @@ show_help() {
     echo -e "  -a, --server-addr <addr>        使用指定的 IP 或域名作为连接地址, e.g., -a 1.2.3.4 or -a example.com"
     echo -e "  -f, --core-file <path>          自定义 $is_core_name 文件路径, e.g., -f /root/$is_core-linux-amd64.tar.gz"
     echo -e "  -l, --local-install             本地获取安装脚本, 使用当前目录"
-    echo -e "  -p, --proxy <addr>              使用代理下载, e.g., -p http://127.0.0.1:2333"
+    echo -e "  -p, --proxy <addr>              使用代理下载, e.g., -p http://127.0.0.1:2333 or -p socks5h://127.0.0.1:1080"
     echo -e "  -v, --core-version <ver>        自定义 $is_core_name 版本, e.g., -v v1.8.13"
     echo -e "  -h, --help                      显示此帮助界面\n"
 
@@ -420,7 +509,10 @@ main() {
     # start installing...
     msg warn "开始安装..."
     [[ $is_core_ver ]] && msg warn "${is_core_name} 版本: ${yellow}$is_core_ver${none}"
-    [[ $proxy ]] && msg warn "使用代理: ${yellow}$proxy${none}"
+    [[ $proxy ]] && {
+        set_proxy_env
+        msg warn "使用代理: ${yellow}$proxy${none}"
+    }
     [[ $server_addr ]] && msg warn "连接地址: ${yellow}$server_addr${none}"
     # create tmpdir
     mkdir -p $tmpdir

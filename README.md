@@ -55,6 +55,33 @@
 - `bash <(curl -fsSL https://raw.githubusercontent.com/lr00rl/sing-box/main/install.sh) --server-addr 1.2.3.4`
 - `bash <(curl -fsSL https://raw.githubusercontent.com/lr00rl/sing-box/main/install.sh) --server-addr example.com`
 
+代理安装命令：
+
+`install.sh` 支持通过 `-p` 或 `--proxy` 指定代理。首次拉取安装脚本本身也需要走代理时，可使用下面的写法：
+
+```bash
+PROXY='socks5h://USER:PASS@HOST:PORT'
+
+export http_proxy="$PROXY"
+export https_proxy="$PROXY"
+export all_proxy="$PROXY"
+export HTTP_PROXY="$PROXY"
+export HTTPS_PROXY="$PROXY"
+export ALL_PROXY="$PROXY"
+
+bash <(curl -fsSL --proxy "$PROXY" \
+  https://raw.githubusercontent.com/lr00rl/sing-box/main/install.sh) \
+  -p "$PROXY"
+```
+
+如需同时指定连接地址：
+
+```bash
+bash <(curl -fsSL --proxy "$PROXY" \
+  https://raw.githubusercontent.com/lr00rl/sing-box/main/install.sh) \
+  -p "$PROXY" --server-addr example.com
+```
+
 如果仓库 Release 中不存在 `code.tar.gz`，远程安装会在下载脚本包时失败；这种情况下可先下载源码后使用本地模式安装：`bash install.sh -l`
 
 安装时如果自动获取 IP 失败，或你希望直接指定连接地址，可执行：
