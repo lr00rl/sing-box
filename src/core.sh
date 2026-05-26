@@ -201,7 +201,7 @@ get_public_ip() {
         ;;
     esac
     for url in "${urls[@]}"; do
-        candidate=$(fetch_public_ip_direct "$family" "$url" 2>/dev/null | tr -d '\r' | sed -n '1{s/[[:space:]]//gp;q}')
+        candidate=$(fetch_public_ip_direct "$family" "$url" 2>/dev/null | tr -d '\r' | sed -n '1{s/[[:space:]]//g;p;q}')
         [[ ! $candidate ]] && continue
         if [[ $family == 4 ]]; then
             is_valid_ipv4 "$candidate" && {
