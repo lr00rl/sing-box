@@ -10,7 +10,23 @@ install_service() {
     fi
 }
 
+systemd_namespace_hardening() {
+    local unit="${1:-service}-namespace-test-$$-$RANDOM"
+    [[ $(type -P systemd-run) ]] || return 0
+
+    systemd-run --unit "$unit" --wait --collect -p PrivateTmp=true -p ProtectSystem=full /bin/true &>/dev/null && {
+        cat <<EOF
+PrivateTmp=true
+ProtectSystem=full
+EOF
+    }
+    return 0
+}
+
 install_service_systemd() {
+    local namespace_hardening
+    namespace_hardening=$(systemd_namespace_hardening "$1")
+
     case $1 in
     $is_core)
         is_doc_site=https://sing-box.sagernet.org/
@@ -29,8 +45,7 @@ Restart=on-failure
 RestartPreventExitStatus=23
 LimitNPROC=10000
 LimitNOFILE=1048576
-PrivateTmp=true
-ProtectSystem=full
+$namespace_hardening
 #CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 #AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 
@@ -55,8 +70,7 @@ ExecReload=$is_caddy_bin reload --config $is_caddyfile --adapter caddyfile
 TimeoutStopSec=5s
 LimitNPROC=10000
 LimitNOFILE=1048576
-PrivateTmp=true
-ProtectSystem=full
+$namespace_hardening
 #AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
