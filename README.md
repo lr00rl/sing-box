@@ -51,9 +51,9 @@
 
 标准安装命令：
 
-- `bash <(curl -fsSL https://raw.githubusercontent.com/lr00rl/sing-box/main/install.sh)`
-- `bash <(curl -fsSL https://raw.githubusercontent.com/lr00rl/sing-box/main/install.sh) --server-addr 1.2.3.4`
-- `bash <(curl -fsSL https://raw.githubusercontent.com/lr00rl/sing-box/main/install.sh) --server-addr example.com`
+- `bash <(curl -fsSL https://github.com/lr00rl/sing-box/raw/main/install.sh)`
+- `bash <(curl -fsSL https://github.com/lr00rl/sing-box/raw/main/install.sh) --server-addr 1.2.3.4`
+- `bash <(curl -fsSL https://github.com/lr00rl/sing-box/raw/main/install.sh) --server-addr example.com`
 
 代理安装命令：
 
@@ -71,7 +71,7 @@ export HTTPS_PROXY="$PROXY"
 export ALL_PROXY="$PROXY"
 
 bash <(curl -fsSL --proxy "$PROXY" \
-  https://raw.githubusercontent.com/lr00rl/sing-box/main/install.sh) \
+  https://github.com/lr00rl/sing-box/raw/main/install.sh) \
   -p "$PROXY"
 ```
 
@@ -79,7 +79,7 @@ bash <(curl -fsSL --proxy "$PROXY" \
 
 ```bash
 bash <(curl -fsSL --proxy "$PROXY" \
-  https://raw.githubusercontent.com/lr00rl/sing-box/main/install.sh) \
+  https://github.com/lr00rl/sing-box/raw/main/install.sh) \
   -p "$PROXY" --server-addr example.com
 ```
 
