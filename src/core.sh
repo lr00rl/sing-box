@@ -965,7 +965,7 @@ manage() {
     fi
     [[ $is_test_run && ! $is_new_install ]] && {
         sleep 2
-        if [[ ! $(pgrep -f $is_run_bin 2>/dev/null || grep -l "$is_run_bin" /proc/*/cmdline 2>/dev/null) ]]; then
+        if [[ ! $(pgrep -f $is_run_bin) ]]; then
             is_run_fail=${is_do_name_msg,,}
             [[ ! $is_no_manage_msg ]] && {
                 msg
@@ -1524,7 +1524,7 @@ get() {
             }
         fi
         is_no_manage_msg=1
-        if [[ ! $(pgrep -f $is_core_bin 2>/dev/null || grep -l "$is_core_bin" /proc/*/cmdline 2>/dev/null) ]]; then
+        if [[ ! $(pgrep -f $is_core_bin) ]]; then
             _yellow "\n测试运行 $is_core_name ..\n"
             manage start &>/dev/null
             if [[ $is_run_fail == $is_core ]]; then
@@ -1537,7 +1537,7 @@ get() {
             _green "\n$is_core_name 正在运行, 跳过测试\n"
         fi
         if [[ $is_caddy ]]; then
-            if [[ ! $(pgrep -f $is_caddy_bin 2>/dev/null || grep -l "$is_caddy_bin" /proc/*/cmdline 2>/dev/null) ]]; then
+            if [[ ! $(pgrep -f $is_caddy_bin) ]]; then
                 _yellow "\n测试运行 Caddy ..\n"
                 manage start caddy &>/dev/null
                 if [[ $is_run_fail == 'caddy' ]]; then
@@ -1613,20 +1613,22 @@ info() {
         is_insecure=1
         is_can_change=(0 1 4 13)
         is_info_show=(0 1 2 10 4 8 20)
-        is_url="$is_protocol://$password@$is_addr:$port?type=tcp&security=tls&allowInsecure=1#233boy-$net-$is_addr"
+        is_url="$is_protocol://$password@$is_addr:$port?type=tcp&security=tls&insecure=1&allowInsecure=1#233boy-$net-$is_addr"
         is_info_str=($is_protocol $is_addr $port $password tcp tls true)
         ;;
     hy*)
         is_can_change=(0 1 4 13)
         is_info_show=(0 1 2 10 8 9 20)
-        is_url="$is_protocol://$password@$is_addr:$port?alpn=h3&insecure=1#233boy-$net-$is_addr"
-        is_info_str=($is_protocol $is_addr $port $password tls h3 true)
+        # fix xray core for client use.
+        is_sha256=$(openssl x509 -noout -fingerprint -sha256 -in $is_core_dir/bin/tls.cer | sed 's/.*=//;s/://g')
+        is_url="$is_protocol://$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&pinSHA256=$is_sha256#233boy-$net-$is_addr"
+        is_info_str=($is_protocol $is_addr $port $password tls h3 "true (设置, 固定证书>证书指纹(SHA-256): $is_sha256)")
         ;;
     tuic)
         is_insecure=1
         is_can_change=(0 1 4 5 13)
         is_info_show=(0 1 2 3 10 8 9 20 21)
-        is_url="$is_protocol://$uuid:$password@$is_addr:$port?alpn=h3&allow_insecure=1&congestion_control=bbr#233boy-$net-$is_addr"
+        is_url="$is_protocol://$uuid:$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&congestion_control=bbr#233boy-$net-$is_addr"
         is_info_str=($is_protocol $is_addr $port $uuid $password tls h3 true bbr)
         ;;
     reality)
@@ -1654,7 +1656,7 @@ info() {
             is_can_change+=(13)
             is_info_show=(0 1 2 10 8 20)
             is_info_str=($is_protocol $is_addr $port $password tls true)
-            is_url="anytls://$password@$is_addr:$port?allowInsecure=1#233boy-$net-$is_addr"
+            is_url="anytls://$password@$is_addr:$port?insecure=1&allowInsecure=1#233boy-$net-$is_addr"
         fi
         ;;
     direct)
