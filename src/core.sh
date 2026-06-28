@@ -112,6 +112,7 @@ is_random_ss_method=${ss_method_list[$(shuf -i 4-6 -n1)]} # random only use ss20
 is_random_servername=${servername_list[$(shuf -i 0-${#servername_list[@]} -n1) - 1]}
 
 msg() {
+    [[ $is_json_out ]] && { echo -e "$@" >&2; return; }
     echo -e "$@"
 }
 
@@ -121,6 +122,7 @@ msg_ul() {
 
 # pause
 pause() {
+    [[ $is_json_out ]] && return 0
     echo
     echo -ne "按 $(_green Enter 回车键) 继续, 或按 $(_red Ctrl + C) 取消."
     read -rs -d $'\n'
@@ -388,6 +390,7 @@ is_port_used() {
 
 # ask input a string or pick a option for list.
 ask() {
+    [[ $is_json_out ]] && json_err "interactive_input_required" "operation needs interactive input ($1); in --json mode pass all required args (and --addr)" 2
     case $1 in
     set_ss_method)
         is_tmp_list=(${ss_method_list[@]})
@@ -1746,6 +1749,117 @@ url_qr() {
     fi
 }
 
+# ------------- Lattice JSON machine interface (design-09 §E.2) -------------
+# All emitters reuse the existing `is_dont_show_info=1; info <file>` pipeline,
+# which populates every field var (and is_url) WITHOUT printing, then return
+# structured JSON on stdout. Human chrome is routed to stderr by msg()/warn()
+# and any TTY prompt becomes a json_err via the ask()/pause() guards.
+
+# Emit one node object from the vars populated by `is_dont_show_info=1; info <file>`.
+json_node_obj() {
+    local eff_port=$port
+    [[ $host && $is_https_port ]] && eff_port=$is_https_port
+    local pass=$password
+    [[ ! $pass && $ss_password ]] && pass=$ss_password
+    jq -nc \
+        --arg name "$is_config_name" \
+        --arg protocol "$is_protocol" \
+        --arg network "$net" \
+        --arg address "$is_addr" \
+        --arg port "$eff_port" \
+        --arg uuid "$uuid" \
+        --arg password "$pass" \
+        --arg method "$ss_method" \
+        --arg sni "$is_servername" \
+        --arg public_key "$is_public_key" \
+        --arg host "$host" \
+        --arg path "$path" \
+        --arg share_url "$is_url" \
+        '{name:$name,protocol:$protocol,network:$network,address:$address,port:$port,uuid:$uuid,password:$password,method:$method,sni:$sni,public_key:$public_key,host:$host,path:$path,share_url:$share_url}
+         | with_entries(select(.value != "" and .value != null))'
+}
+
+# list/ls [filter] -> {ok,count,nodes:[...]}  (pass --addr so addresses resolve without network)
+cmd_json_list() {
+    is_json_out=1
+    local filter="$1"
+    [[ ! $filter ]] && filter='\.json$'
+    local files=() nodes=() f out
+    [[ -d $is_conf_dir ]] && readarray -t files <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -E -i "$filter" | sed '/dynamic-port-.*-link/d')"
+    for f in "${files[@]}"; do
+        [[ ! $f ]] && continue
+        # isolate each node in a subshell so per-file var pollution can't leak
+        out="$(
+            is_dont_show_info=1
+            is_dont_test_host=1
+            info "$f" >/dev/null 2>&1
+            json_node_obj
+        )"
+        [[ $out ]] && nodes+=("$out")
+    done
+    if [[ ${#nodes[@]} -eq 0 ]]; then
+        printf '{"ok":true,"count":0,"nodes":[]}\n'
+    else
+        printf '%s\n' "${nodes[@]}" | jq -s '{ok:true,count:length,nodes:.}'
+    fi
+    exit 0
+}
+
+# info <name> --json -> {ok,node:{...}}  (exact single match; 0/>1 -> structured error)
+cmd_json_info() {
+    is_json_out=1
+    local name="$1"
+    [[ ! $name ]] && json_err "missing_name" "info --json requires a node name" 2
+    local matches=() cleaned=() m
+    [[ -d $is_conf_dir ]] && readarray -t matches <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -E -i "$name" | sed '/dynamic-port-.*-link/d')"
+    for m in "${matches[@]}"; do [[ $m ]] && cleaned+=("$m"); done
+    [[ ${#cleaned[@]} -eq 0 ]] && json_err "not_found" "no node matches: $name" 2
+    [[ ${#cleaned[@]} -gt 1 ]] && json_err "ambiguous" "multiple nodes match: $name" 2
+    is_dont_show_info=1
+    is_dont_test_host=1
+    info "${cleaned[0]}" 2>/dev/null
+    printf '{"ok":true,"node":%s}\n' "$(json_node_obj)"
+    exit 0
+}
+
+# sub -> {ok,count,plain,base64}  aggregate every node's share link (the missing aggregator)
+cmd_json_sub() {
+    is_json_out=1
+    local files=() urls=() f u
+    [[ -d $is_conf_dir ]] && readarray -t files <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -E -i '\.json$' | sed '/dynamic-port-.*-link/d')"
+    for f in "${files[@]}"; do
+        [[ ! $f ]] && continue
+        u="$(is_dont_show_info=1; is_dont_test_host=1; info "$f" >/dev/null 2>&1; printf '%s' "$is_url")"
+        [[ $u ]] && urls+=("$u")
+    done
+    local plain="" b64=""
+    if [[ ${#urls[@]} -gt 0 ]]; then
+        plain="$(printf '%s\n' "${urls[@]}")"
+        b64="$(printf '%s\n' "${urls[@]}" | base64 | tr -d '\n')"
+    fi
+    jq -nc --arg plain "$plain" --arg b64 "$b64" --argjson count "${#urls[@]}" \
+        '{ok:true,count:$count,plain:$plain,base64:$b64}'
+    exit 0
+}
+
+# provision --json -> {ok,installed,version,service_active}  (status probe; fresh install = install.sh)
+cmd_json_provision() {
+    is_json_out=1
+    local installed=false version="" active=false
+    [[ -x $is_core_bin ]] && {
+        installed=true
+        version="$($is_core_bin version 2>/dev/null | head -1 | awk '{print $NF}')"
+    }
+    if [[ $is_systemd ]]; then
+        systemctl is-active --quiet "$is_core" 2>/dev/null && active=true
+    elif [[ $is_openrc ]]; then
+        rc-service "$is_core" status &>/dev/null && active=true
+    fi
+    jq -nc --argjson installed "$installed" --arg version "$version" --argjson active "$active" \
+        '{ok:true,installed:$installed,version:$version,service_active:$active}'
+    exit 0
+}
+
 # update core, sh, caddy
 update() {
     case $1 in
@@ -1807,6 +1921,10 @@ pass_args() {
             [[ $(is_test addr "$server_addr") ]] || err "($server_addr) 不是一个有效的 IP 或域名."
             is_custom_addr=$server_addr
             shift 2
+            ;;
+        --json)
+            is_json_out=1
+            shift
             ;;
         --)
             shift
@@ -1900,10 +2018,21 @@ main() {
     }
     [[ ! $1 ]] && set -- main
     case $1 in
+    list | ls)
+        cmd_json_list "$2"
+        ;;
+    sub)
+        cmd_json_sub
+        ;;
+    provision)
+        cmd_json_provision
+        ;;
     a | add | gen | no-auto-tls)
         [[ $1 == 'gen' ]] && is_gen=1
         [[ $1 == 'no-auto-tls' ]] && is_no_auto_tls=1
+        [[ $is_json_out && ! $is_gen ]] && { is_dont_show_info=1; is_dont_test_host=1; }
         add ${@:2}
+        [[ $is_json_out && ! $is_gen ]] && { wait 2>/dev/null; printf '{"ok":true,"node":%s}\n' "$(json_node_obj)"; exit 0; }
         ;;
     bin | pbk | check | completion | format | generate | geoip | geosite | merge | rule-set | run | tools)
         is_run_command=$1
@@ -1919,12 +2048,21 @@ main() {
         _try_enable_bbr
         ;;
     c | config | change)
+        [[ $is_json_out ]] && { is_dont_show_info=1; is_dont_test_host=1; }
         change ${@:2}
+        [[ $is_json_out ]] && { wait 2>/dev/null; printf '{"ok":true,"node":%s}\n' "$(json_node_obj)"; exit 0; }
         ;;
     # client | genc)
     #     create client $2
     #     ;;
     d | del | rm)
+        [[ $is_json_out ]] && {
+            is_no_del_msg=1
+            del $2
+            wait 2>/dev/null
+            printf '{"ok":true,"deleted":"%s"}\n' "$is_config_file"
+            exit 0
+        }
         del $2
         ;;
     dd | ddel | fix | fix-all)
@@ -1984,6 +2122,7 @@ main() {
         fi
         ;;
     i | info)
+        [[ $is_json_out ]] && cmd_json_info "$2"
         info $2
         ;;
     ip)

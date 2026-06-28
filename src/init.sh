@@ -38,13 +38,28 @@ is_err=$(_red_bg 错误!)
 is_warn=$(_red_bg 警告!)
 
 err() {
+    [[ $is_json_out ]] && json_err "error" "$*"
     echo -e "\n$is_err $@\n"
     [[ $is_dont_auto_exit ]] && return
     exit 1
 }
 
 warn() {
+    [[ $is_json_out ]] && { echo -e "$is_warn $@" >&2; return; }
     echo -e "\n$is_warn $@\n"
+}
+
+# JSON machine-output helpers (Lattice control-plane interface; see design-09 §E.2).
+# In --json mode every error returns a structured object instead of human text,
+# so a headless caller (the lattice-node-agent) never has to parse colored output.
+json_err() {
+    # $1=code  $2=message  $3=exit code (default 1)
+    if type -P jq &>/dev/null; then
+        jq -nc --arg e "${1:-error}" --arg m "${2:-}" '{ok:false,error:$e,message:$m}'
+    else
+        printf '{"ok":false,"error":"%s","message":"%s"}\n' "${1:-error}" "${2:-}"
+    fi
+    exit "${3:-1}"
 }
 
 # load bash script.
