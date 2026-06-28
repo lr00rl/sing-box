@@ -1860,6 +1860,43 @@ cmd_json_provision() {
     exit 0
 }
 
+# backup [--json] -> archive the sing-box config DATA (config.json + conf/, incl.
+# per-node .json and .addr sidecars) to /opt/lattice/.archive_backup/ as a
+# timestamped tarball. Works on any install — including nodes deployed by hand or
+# by the interactive 233boy flow — because it archives whatever is on disk.
+cmd_backup() {
+    local dir=/opt/lattice/.archive_backup
+    local items=()
+    [[ -f $is_config_json ]] && items+=(config.json)
+    [[ -d $is_conf_dir ]] && items+=(conf)
+    if [[ ${#items[@]} -eq 0 ]]; then
+        [[ $is_json_out ]] && json_err "nothing_to_backup" "no sing-box config data under $is_core_dir" 2
+        err "没有可备份的 $is_core_name 数据 ($is_core_dir)"
+    fi
+    mkdir -p "$dir" 2>/dev/null || {
+        [[ $is_json_out ]] && json_err "backup_dir" "cannot create $dir" 2
+        err "无法创建备份目录: $dir"
+    }
+    local ts archive
+    ts=$(date -u +%Y%m%d-%H%M%S)
+    archive="$dir/sing-box-$ts.tar.gz"
+    if ! tar -C "$is_core_dir" -czf "$archive" "${items[@]}" 2>/dev/null; then
+        [[ $is_json_out ]] && json_err "backup_failed" "tar failed writing $archive" 2
+        err "备份失败: $archive"
+    fi
+    local n bytes
+    n=$(ls "$is_conf_dir" 2>/dev/null | grep -E -ic '\.json$')
+    bytes=$(wc -c <"$archive" 2>/dev/null | tr -d ' ')
+    [[ $bytes ]] || bytes=0
+    if [[ $is_json_out ]]; then
+        jq -nc --arg archive "$archive" --argjson bytes "$bytes" --argjson nodes "${n:-0}" \
+            '{ok:true,archive:$archive,bytes:$bytes,nodes:$nodes}'
+    else
+        _green "\n备份完成: $archive ($bytes bytes, $n 个节点)\n"
+    fi
+    exit 0
+}
+
 # update core, sh, caddy
 update() {
     case $1 in
@@ -2026,6 +2063,9 @@ main() {
         ;;
     provision)
         cmd_json_provision
+        ;;
+    backup)
+        cmd_backup
         ;;
     a | add | gen | no-auto-tls)
         [[ $1 == 'gen' ]] && is_gen=1
