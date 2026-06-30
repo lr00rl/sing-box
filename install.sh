@@ -26,6 +26,12 @@ _red_bg() { echo -e "\e[41m$@${none}"; }
 is_err=$(_red_bg 错误!)
 is_warn=$(_red_bg 警告!)
 
+safe_clear() {
+    if [ -n "${TERM:-}" ] && command -v clear >/dev/null 2>&1; then
+        clear
+    fi
+}
+
 err() {
     echo -e "\n$is_err $@\n" && exit 1
 }
@@ -588,7 +594,7 @@ reinstall_script_only() {
         err "未检测到完整的 ${is_core_name} 安装, 无法只重装管理脚本."
     fi
 
-    clear
+    safe_clear
     echo
     echo "........... $is_core_name script by ${display_author:-$author} .........."
     echo "........... script-only reinstall .........."
@@ -626,7 +632,7 @@ main() {
     [[ $script_only ]] && err "未检测到完整的 ${is_core_name} 安装, 无法只重装管理脚本."
 
     # show welcome msg
-    clear
+    safe_clear
     echo
     echo "........... $is_core_name script by ${display_author:-$author} .........."
     echo "........... forked from $origin_repo .........."
