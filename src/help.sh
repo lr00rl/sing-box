@@ -57,7 +57,7 @@ show_help() {
             "   s, status                                       运行状态"
             "   start, stop, restart [caddy]                    启动, 停止, 重启"
             "   t, test                                         测试运行"
-            "   reinstall                                       重装脚本\n"
+            "   reinstall                                       重装管理脚本\n"
             "测试:"
             # "   client, genc [name]                             显示用于客户端 JSON, 仅供参考"
             "   debug [name]                                    显示一些 debug 信息, 仅供参考"

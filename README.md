@@ -68,6 +68,8 @@ bash <(curl -fsSL https://github.com/lr00rl/sing-box/raw/main/install.sh) --serv
 bash <(curl -fsSL https://github.com/lr00rl/sing-box/raw/main/install.sh) --server-addr example.com
 ```
 
+如果机器上已经安装过 233boy/sing-box 或本 fork 的旧版本，直接执行上面的安装命令会自动进入脚本层迁移模式：只替换 `/etc/sing-box/sh` 管理脚本和 `/usr/local/bin/sing-box`、`/usr/local/bin/sb` 链接，保留已有 core、`config.json`、`conf/`、日志和服务。
+
 也可以指定 `sing-box` core 版本或本地 core 包：
 
 ```bash
@@ -118,6 +120,12 @@ bash install.sh --local-install
 
 ```bash
 bash install.sh --local-install --server-addr example.com
+```
+
+只重装或迁移管理脚本：
+
+```bash
+bash <(curl -fsSL https://github.com/lr00rl/sing-box/raw/main/install.sh) --script-only
 ```
 
 ## 常用命令
@@ -179,6 +187,14 @@ sb update sh
 sb update caddy
 sb update core v1.12.0
 ```
+
+重装管理脚本：
+
+```bash
+sb reinstall
+```
+
+`sb reinstall` 只刷新 `/etc/sing-box/sh`，不会删除已有节点配置。如果需要完整卸载，使用 `sb uninstall`。
 
 卸载：
 
@@ -270,6 +286,7 @@ sb --json del <name>
 - Release 资产 `code.tar.gz` 是远程安装和 `sb update sh` 使用的脚本包。
 - 如果修改脚本逻辑并希望已安装机器检测到更新，需要同步提升 `is_sh_ver`。
 - 安装脚本里的 `is_sh_repo` 指向 `lr00rl/sing-box`。
+- 远程安装脚本检测到已有安装时，会默认只替换管理脚本层，方便从上游脚本迁移到本 fork。
 
 ## 反馈
 

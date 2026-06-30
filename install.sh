@@ -338,6 +338,7 @@ show_help() {
     echo -e "  -f, --core-file <path>          自定义 $is_core_name 文件路径, e.g., -f /root/$is_core-linux-amd64.tar.gz"
     echo -e "  -l, --local-install             本地获取安装脚本, 使用当前目录"
     echo -e "  -p, --proxy <addr>              使用代理下载, e.g., -p http://127.0.0.1:2333 or -p socks5h://127.0.0.1:1080"
+    echo -e "      --script-only               只重装管理脚本, 保留 core、配置、日志和服务"
     echo -e "  -v, --core-version <ver>        自定义 $is_core_name 版本, e.g., -v v1.8.13"
     echo -e "  -h, --help                      显示此帮助界面\n"
 
@@ -503,6 +504,10 @@ pass_args() {
             proxy=$2
             shift 2
             ;;
+        --script-only | --reinstall-sh | --reinstall-script)
+            script_only=1
+            shift 1
+            ;;
         -v | --core-version)
             [[ -z $2 ]] && {
                 err "($1) 缺少必需参数, 正确使用示例: [$1 v1.8.13]"
@@ -537,16 +542,88 @@ exit_and_del_tmpdir() {
     exit
 }
 
+is_installed() {
+    [[ -f $is_sh_bin && -d $is_core_dir/bin && -d $is_sh_dir && -d $is_conf_dir ]]
+}
+
+prepare_sh_dir() {
+    new_sh_dir=$tmpdir/sh-new
+    rm -rf "$new_sh_dir"
+    mkdir -p "$new_sh_dir"
+    if [[ $local_install ]]; then
+        cp -rf "$PWD"/* "$new_sh_dir"
+        msg warn "${yellow}本地获取安装脚本 > $PWD ${none}"
+    else
+        install_pkg wget tar bash
+        [[ -f $is_pkg_ok ]] || err "安装依赖包失败, 请手动确认 wget/tar/bash 是否可用."
+        is_wget=$(type -P wget)
+        [[ ! $is_wget ]] && err "无法找到 wget, 请先安装 wget 后重试."
+        download sh
+        [[ -f $is_sh_ok ]] || err "下载 ${is_core_name} 脚本失败"
+        tar zxf "$is_sh_ok" -C "$new_sh_dir" || err "解压 ${is_core_name} 脚本失败"
+    fi
+    [[ -f $new_sh_dir/$is_core.sh && -f $new_sh_dir/src/init.sh ]] || {
+        err "脚本包不完整, 未找到 $is_core.sh 或 src/init.sh."
+    }
+}
+
+install_sh_dir() {
+    local old_sh_dir=
+    if [[ -d $is_sh_dir ]]; then
+        old_sh_dir=$is_core_dir/sh.backup-$(date -u +%Y%m%d-%H%M%S)
+        mv "$is_sh_dir" "$old_sh_dir" || err "备份旧脚本目录失败: $is_sh_dir"
+    fi
+    if ! mv "$new_sh_dir" "$is_sh_dir"; then
+        [[ $old_sh_dir ]] && mv "$old_sh_dir" "$is_sh_dir" 2>/dev/null
+        err "安装新脚本目录失败: $is_sh_dir"
+    fi
+    ln -sf $is_sh_dir/$is_core.sh $is_sh_bin
+    ln -sf $is_sh_dir/$is_core.sh ${is_sh_bin/$is_core/sb}
+    chmod +x $is_sh_dir/$is_core.sh $is_sh_bin ${is_sh_bin/$is_core/sb}
+    [[ $old_sh_dir ]] && msg warn "旧脚本目录已备份: ${yellow}$old_sh_dir${none}"
+}
+
+reinstall_script_only() {
+    if ! is_installed; then
+        err "未检测到完整的 ${is_core_name} 安装, 无法只重装管理脚本."
+    fi
+
+    clear
+    echo
+    echo "........... $is_core_name script by ${display_author:-$author} .........."
+    echo "........... script-only reinstall .........."
+    echo
+
+    [[ $proxy ]] && {
+        set_proxy_env
+        msg warn "使用代理: ${yellow}$proxy${none}"
+    }
+    [[ $is_core_ver || $is_core_file ]] && {
+        msg warn "script-only 模式不会更新 core, 如需更新请在迁移后使用: ${yellow}$is_core update core${none}"
+    }
+    [[ $server_addr ]] && msg warn "script-only 模式会保留现有配置, 不会修改连接地址: ${yellow}$server_addr${none}"
+
+    mkdir -p "$tmpdir"
+    msg warn "检测到已安装 ${is_core_name}, 仅重装管理脚本..."
+    prepare_sh_dir
+    install_sh_dir
+    msg ok "脚本重装完成, 已保留 core、配置、日志和服务."
+    exit_and_del_tmpdir ok
+}
+
 # main
 main() {
 
-    # check old version
-    [[ -f $is_sh_bin && -d $is_core_dir/bin && -d $is_sh_dir && -d $is_conf_dir ]] && {
-        err "检测到脚本已安装, 如需重装请使用${green} ${is_core} reinstall ${none}命令."
-    }
-
     # check parameters
     [[ $# -gt 0 ]] && pass_args $@
+
+    # Existing installs should be adopted by replacing only the management
+    # scripts. This preserves config.json, conf/, core binaries, logs, and
+    # service state when migrating from the upstream 233boy script.
+    if is_installed; then
+        reinstall_script_only
+    fi
+    [[ $script_only ]] && err "未检测到完整的 ${is_core_name} 安装, 无法只重装管理脚本."
 
     # show welcome msg
     clear

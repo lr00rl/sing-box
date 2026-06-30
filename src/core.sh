@@ -903,7 +903,6 @@ uninstall() {
             rm -rf $is_caddy_dir $is_caddy_bin /etc/init.d/caddy
         fi
     fi
-    [[ $is_install_sh ]] && return # reinstall
     _green "\n卸载完成!"
     msg "脚本哪里需要完善? 请反馈"
     msg "反馈问题) $(msg_ul https://github.com/${is_sh_repo}/issues)\n"
@@ -1507,9 +1506,7 @@ get() {
         _green "安装 Caddy 成功.\n"
         ;;
     reinstall)
-        is_install_sh=$(cat $is_sh_dir/install.sh)
-        uninstall
-        bash <<<$is_install_sh
+        bash "$is_sh_dir/install.sh" --script-only
         ;;
     test-run)
         if [[ $is_systemd ]]; then
