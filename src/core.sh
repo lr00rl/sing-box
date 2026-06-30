@@ -1765,6 +1765,70 @@ json_node_obj() {
          | with_entries(select(.value != "" and .value != null))'
 }
 
+line_json_obj() {
+    local raw_file=$is_conf_dir/$is_config_name
+    local node_json custom_addr domain
+    [[ -f $raw_file ]] || json_err "not_found" "config file not found: $is_config_name" 2
+
+    node_json=$(json_node_obj)
+    custom_addr=$is_custom_addr
+    domain=$host
+    [[ ! $domain ]] && domain=$is_anytls_domain
+    [[ ! $domain ]] && domain=$custom_addr
+    [[ ! $domain ]] && domain=$is_servername
+
+    jq -c \
+        --arg core "$is_core" \
+        --arg tag "$is_config_name" \
+        --arg domain "$domain" \
+        --arg custom_addr "$custom_addr" \
+        --argjson node "$node_json" '
+        def compact_obj:
+            with_entries(select(.value != "" and .value != null and .value != []));
+        def users_for($in):
+            if (($in.users // []) | length) > 0 then
+                ($in.users | map({
+                    name:(.name // .username // .uuid // ""),
+                    uuid:(.uuid // ""),
+                    username:(.username // ""),
+                    password:(.password // ""),
+                    method:($in.method // .method // "")
+                } | compact_obj))
+            elif (($in.password // "") != "" or ($in.method // "") != "") then
+                [{password:($in.password // ""),method:($in.method // "")} | compact_obj]
+            else
+                []
+            end;
+        .inbounds[0] as $in
+        | {
+            core:$core,
+            tag:($in.tag // $tag),
+            type:($in.type // $node.protocol // ""),
+            listen_host:($in.listen // ""),
+            listen_port:($in.listen_port // null),
+            users:users_for($in),
+            outbound:{
+                tag:(.outbounds[1].tag // .outbounds[0].tag // "direct"),
+                protocol:(.outbounds[1].type // .outbounds[0].type // "direct")
+            },
+            domain:$domain,
+            metadata:({
+                config_file:$tag,
+                address:($node.address // ""),
+                custom_addr:$custom_addr,
+                network:($node.network // ""),
+                share_url:($node.share_url // ""),
+                method:($node.method // ""),
+                sni:($node.sni // ""),
+                public_key:($node.public_key // ""),
+                host:($node.host // ""),
+                path:($node.path // ""),
+                node:$node,
+                lattice:($in._lattice // null)
+            } | compact_obj)
+        } | compact_obj' "$raw_file"
+}
+
 # list/ls [filter] -> {ok,count,nodes:[...]}  (pass --addr so addresses resolve without network)
 cmd_json_list() {
     is_json_out=1
@@ -1787,6 +1851,51 @@ cmd_json_list() {
         printf '{"ok":true,"count":0,"nodes":[]}\n'
     else
         printf '%s\n' "${nodes[@]}" | jq -s '{ok:true,count:length,nodes:.}'
+    fi
+    exit 0
+}
+
+# inspect [name] --json -> Line shape. With no name, returns all lines.
+cmd_json_inspect() {
+    is_json_out=1
+    local name="$1"
+    local files=() matches=() cleaned=() lines=() f out
+    if [[ $name ]]; then
+        if [[ -f $is_conf_dir/$name ]]; then
+            matches=("$name")
+        elif [[ -f $is_conf_dir/$name.json ]]; then
+            matches=("$name.json")
+        elif [[ -d $is_conf_dir ]]; then
+            readarray -t matches <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -F -i -- "$name" | sed '/dynamic-port-.*-link/d')"
+        fi
+        for f in "${matches[@]}"; do
+            [[ $f && $f =~ \.json$ ]] && cleaned+=("$f")
+        done
+        [[ ${#cleaned[@]} -eq 0 ]] && json_err "not_found" "no line matches: $name" 2
+        [[ ${#cleaned[@]} -gt 1 ]] && json_err "ambiguous" "multiple lines match: $name" 2
+        is_config_file="${cleaned[0]}"
+        is_dont_show_info=1
+        is_dont_test_host=1
+        info "$is_config_file" >/dev/null 2>&1
+        printf '{"ok":true,"line":%s}\n' "$(line_json_obj)"
+    else
+        [[ -d $is_conf_dir ]] && readarray -t files <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -E -i '\.json$' | sed '/dynamic-port-.*-link/d')"
+        for f in "${files[@]}"; do
+            [[ ! $f ]] && continue
+            out="$(
+                is_config_file="$f"
+                is_dont_show_info=1
+                is_dont_test_host=1
+                info "$f" >/dev/null 2>&1
+                line_json_obj
+            )"
+            [[ $out ]] && lines+=("$out")
+        done
+        if [[ ${#lines[@]} -eq 0 ]]; then
+            printf '{"ok":true,"count":0,"lines":[]}\n'
+        else
+            printf '%s\n' "${lines[@]}" | jq -s '{ok:true,count:length,lines:.}'
+        fi
     fi
     exit 0
 }
@@ -2052,6 +2161,9 @@ main() {
         ;;
     backup)
         cmd_backup
+        ;;
+    inspect)
+        cmd_json_inspect "$2"
         ;;
     a | add | gen | no-auto-tls)
         [[ $1 == 'gen' ]] && is_gen=1

@@ -15,7 +15,7 @@
 - 安装阶段支持 `--server-addr` / `--addr` 手动指定连接地址，避免自动获取公网 IP 失败或拿到错误地址。
 - 支持 `-p` / `--proxy` 代理下载安装资源；公网 IP 探测会绕过代理直连，避免拿到代理出口 IP。
 - 运行时支持 `sb --addr <ip|domain> ...` 临时覆盖连接地址，并为配置保存 `.addr` sidecar。
-- 增加面向 Lattice / Probe-Dashboards 使用的 JSON 自动化接口，例如 `list`、`info --json`、`sub`、`provision`、`backup --json`。
+- 增加面向 Lattice / Probe-Dashboards 使用的 JSON 自动化接口，例如 `list`、`inspect`、`info --json`、`sub`、`provision`、`backup --json`。
 - 增加配置备份：`sb backup` 会归档 `/etc/sing-box/config.json` 和 `/etc/sing-box/conf/` 到 `/opt/lattice/.archive_backup/`。
 - 去掉脚本帮助、页脚、分享链接标签里的上游展示信息；只在 README 和 `about` 中保留 fork 来源与致谢。
 
@@ -242,6 +242,8 @@ sb addr <name> auto
 ```bash
 sb list
 sb list reality
+sb inspect --json
+sb inspect <name> --json
 sb --json info <name>
 sb sub
 sb provision
@@ -259,6 +261,8 @@ sb --json del <name>
 常见返回：
 
 - `list`：`{ok,count,nodes:[...]}`
+- `inspect --json`：`{ok,count,lines:[...]}`
+- `inspect <name> --json`：`{ok,line:{core,tag,type,listen_host,listen_port,users,outbound,domain,metadata}}`
 - `info --json`：`{ok,node:{...}}`
 - `sub`：`{ok,count,plain,base64}`
 - `provision`：`{ok,installed,version,service_active}`

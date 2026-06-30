@@ -66,6 +66,7 @@ show_help() {
             # "   xapi [...]                                      同等于 $is_core api, 但 API 后端使用当前运行的 $is_core_name 服务\n"
             "自动化:"
             "   list, ls [filter]                               以 JSON 列出配置"
+            "   inspect [name]                                  以 JSON 输出 Line 形态配置"
             "   sub                                             以 JSON 输出全部节点订阅内容"
             "   provision                                       以 JSON 检查安装与服务状态"
             "   backup [--json]                                 备份配置数据\n"
