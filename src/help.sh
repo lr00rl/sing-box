@@ -5,7 +5,7 @@ show_help() {
         ;;
     *)
         [[ $1 ]] && warn "未知选项 '$1'"
-        msg "$is_core_name script $is_sh_ver by $author"
+        msg "$is_core_name script $is_sh_ver by ${display_author:-$author}"
         msg "Usage: $is_core [options]... [args]... "
         msg
         help_info=(
@@ -64,6 +64,11 @@ show_help() {
             "   gen [...]                                       同等于 add, 但只显示 JSON 内容, 不创建文件, 测试使用"
             "   no-auto-tls [...]                               同等于 add, 但禁止自动配置 TLS, 可用于 *TLS 相关协议"
             # "   xapi [...]                                      同等于 $is_core api, 但 API 后端使用当前运行的 $is_core_name 服务\n"
+            "自动化:"
+            "   list, ls [filter]                               以 JSON 列出配置"
+            "   sub                                             以 JSON 输出全部节点订阅内容"
+            "   provision                                       以 JSON 检查安装与服务状态"
+            "   backup [--json]                                 备份配置数据\n"
             "其他:"
             "   bbr                                             启用 BBR, 如果支持"
             "   bin [...]                                       运行 $is_core_name 命令, 例如: $is_core bin help"
@@ -75,23 +80,20 @@ show_help() {
         done
         msg "谨慎使用 del, ddel, 此选项会直接删除配置; 无需确认"
         msg "反馈问题) $(msg_ul https://github.com/${is_sh_repo}/issues) "
-        msg "文档(doc) $(msg_ul https://233boy.com/$is_core/$is_core-script/)"
+        msg "文档(doc) $(msg_ul $is_doc_url)"
         ;;
 
     esac
 }
 
 about() {
-    ####### 要点13脸吗只会改我链接的小人 #######
-    unset c n m s b
     msg
-    msg "网站: $(msg_ul https://233boy.com)"
-    msg "频道: $(msg_ul https://t.me/tg2333)"
-    msg "群组: $(msg_ul https://t.me/tg233boy)"
-    msg "Github: $(msg_ul https://github.com/${is_sh_repo})"
-    msg "Twitter: $(msg_ul https://twitter.com/ai233boy)"
+    msg "项目: $(msg_ul ${is_project_url:-https://github.com/${is_sh_repo}})"
+    msg "文档: $(msg_ul $is_doc_url)"
+    msg "反馈: $(msg_ul https://github.com/${is_sh_repo}/issues)"
+    msg "Fork 来源: $(msg_ul https://github.com/${origin_repo:-233boy/sing-box})"
+    msg "致谢: 感谢 233boy/sing-box 提供原始一键脚本基础"
     msg "$is_core_name site: $(msg_ul https://sing-box.sagernet.org/)"
     msg "$is_core_name core: $(msg_ul https://github.com/${is_core_repo})"
     msg
-    ####### 要点13脸吗只会改我链接的小人 #######
 }

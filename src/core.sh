@@ -798,9 +798,6 @@ change() {
         [[ $is_auto ]] && is_new_servername=$is_random_servername
         [[ ! $is_new_servername ]] && ask string is_new_servername "请输入新的 serverName:"
         is_servername=$is_new_servername
-        [[ $(grep -i "^233boy.com$" <<<$is_servername) ]] && {
-            err "你干嘛～哎呦～"
-        }
         add $net
         ;;
     11)
@@ -812,13 +809,9 @@ change() {
         [[ ! -f $is_caddy_conf/${host}.conf.add ]] && err "无法配置伪装网站."
         [[ ! $is_new_proxy_site ]] && ask string is_new_proxy_site "请输入新的伪装网站 (例如 example.com):"
         proxy_site=$(sed 's#^.*//##;s#/$##' <<<$is_new_proxy_site)
-        [[ $(grep -i "^233boy.com$" <<<$proxy_site) ]] && {
-            err "你干嘛～哎呦～"
-        } || {
-            load caddy.sh
-            caddy_config proxy
-            manage restart caddy &
-        }
+        load caddy.sh
+        caddy_config proxy
+        manage restart caddy &
         msg "\n已更新伪装网站为: $(_green $proxy_site) \n"
         ;;
     12)
@@ -1197,7 +1190,7 @@ add() {
                 get_port
                 is_https_port=$tmp_port
                 warn "端口 (80 或 443) 已经被占用, 你也可以考虑使用 no-auto-tls"
-                msg "\e[41m no-auto-tls 帮助(help)\e[0m: $(msg_ul https://233boy.com/$is_core/no-auto-tls/)\n"
+                msg "\e[41m no-auto-tls 帮助(help)\e[0m: $(msg_ul $is_no_auto_tls_doc_url)\n"
                 msg "\n Caddy 将使用非标准端口实现自动配置 TLS, HTTP:$is_http_port HTTPS:$is_https_port\n"
                 msg "请确定是否继续???"
                 pause
@@ -1426,7 +1419,7 @@ get() {
         socks*)
             net=socks
             is_protocol=$net
-            [[ ! $is_socks_user ]] && is_socks_user=233boy
+            [[ ! $is_socks_user ]] && is_socks_user=${display_author:-lr00rl}
             [[ ! $is_socks_pass ]] && is_socks_pass=$uuid
             json_str="users:[{username: \"$is_socks_user\", password: \"$is_socks_pass\"}]"
             ;;
@@ -1559,6 +1552,7 @@ get() {
 
 # show info
 info() {
+    [[ ! $is_share_name_prefix ]] && is_share_name_prefix=lr00rl
     if [[ ! $is_protocol ]]; then
         get info $1
     fi
@@ -1571,7 +1565,7 @@ info() {
             is_can_change=(0 1 2 3 5 13)
             is_info_show=(0 1 2 3 4 6 7 8)
             [[ $is_protocol == 'vmess' ]] && {
-                is_vmess_url=$(jq -c '{v:2,ps:'\"233boy-$net-$host\"',add:'\"$is_addr\"',port:'\"$is_https_port\"',id:'\"$uuid\"',aid:"0",net:'\"$net\"',host:'\"$host\"',path:'\"$path\"',tls:'\"tls\"'}' <<<{})
+                is_vmess_url=$(jq -c '{v:2,ps:'\"$is_share_name_prefix-$net-$host\"',add:'\"$is_addr\"',port:'\"$is_https_port\"',id:'\"$uuid\"',aid:"0",net:'\"$net\"',host:'\"$host\"',path:'\"$path\"',tls:'\"tls\"'}' <<<{})
                 is_url=vmess://$(echo -n $is_vmess_url | base64 -w 0)
             } || {
                 [[ $is_protocol == "trojan" ]] && {
@@ -1580,7 +1574,7 @@ info() {
                     is_can_change=(0 1 2 3 4 13)
                     is_info_show=(0 1 2 10 4 6 7 8)
                 }
-                is_url="$is_protocol://$uuid@$is_addr:$is_https_port?encryption=none&security=tls&type=$net&host=$host&path=$path#233boy-$net-$host"
+                is_url="$is_protocol://$uuid@$is_addr:$is_https_port?encryption=none&security=tls&type=$net&host=$host&path=$path#$is_share_name_prefix-$net-$host"
             }
             [[ $is_caddy ]] && is_can_change+=(11)
             is_info_str=($is_protocol $is_addr $is_https_port $uuid $net $host $path 'tls')
@@ -1602,21 +1596,21 @@ info() {
                 is_info_str+=(tls h3 true)
                 is_quic_add=",tls:\"tls\",alpn:\"h3\"" # cant add allowInsecure
             }
-            is_vmess_url=$(jq -c "{v:2,ps:\"233boy-${net}-$is_addr\",add:\"$is_addr\",port:\"$port\",id:\"$uuid\",aid:\"0\",net:\"$net\",type:\"$is_type\"$is_quic_add}" <<<{})
+            is_vmess_url=$(jq -c "{v:2,ps:\"$is_share_name_prefix-${net}-$is_addr\",add:\"$is_addr\",port:\"$port\",id:\"$uuid\",aid:\"0\",net:\"$net\",type:\"$is_type\"$is_quic_add}" <<<{})
             is_url=vmess://$(echo -n $is_vmess_url | base64 -w 0)
         fi
         ;;
     ss)
         is_can_change=(0 1 4 6 13)
         is_info_show=(0 1 2 10 11)
-        is_url="ss://$(echo -n ${ss_method}:${ss_password} | base64 -w 0)@${is_addr}:${port}#233boy-$net-${is_addr}"
+        is_url="ss://$(echo -n ${ss_method}:${ss_password} | base64 -w 0)@${is_addr}:${port}#$is_share_name_prefix-$net-${is_addr}"
         is_info_str=($is_protocol $is_addr $port $ss_password $ss_method)
         ;;
     trojan)
         is_insecure=1
         is_can_change=(0 1 4 13)
         is_info_show=(0 1 2 10 4 8 20)
-        is_url="$is_protocol://$password@$is_addr:$port?type=tcp&security=tls&insecure=1&allowInsecure=1#233boy-$net-$is_addr"
+        is_url="$is_protocol://$password@$is_addr:$port?type=tcp&security=tls&insecure=1&allowInsecure=1#$is_share_name_prefix-$net-$is_addr"
         is_info_str=($is_protocol $is_addr $port $password tcp tls true)
         ;;
     hy*)
@@ -1624,14 +1618,14 @@ info() {
         is_info_show=(0 1 2 10 8 9 20)
         # fix xray core for client use.
         is_sha256=$(openssl x509 -noout -fingerprint -sha256 -in $is_core_dir/bin/tls.cer | sed 's/.*=//;s/://g')
-        is_url="$is_protocol://$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&pinSHA256=$is_sha256#233boy-$net-$is_addr"
+        is_url="$is_protocol://$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&pinSHA256=$is_sha256#$is_share_name_prefix-$net-$is_addr"
         is_info_str=($is_protocol $is_addr $port $password tls h3 "true (设置, 固定证书>证书指纹(SHA-256): $is_sha256)")
         ;;
     tuic)
         is_insecure=1
         is_can_change=(0 1 4 5 13)
         is_info_show=(0 1 2 3 10 8 9 20 21)
-        is_url="$is_protocol://$uuid:$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&congestion_control=bbr#233boy-$net-$is_addr"
+        is_url="$is_protocol://$uuid:$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&congestion_control=bbr#$is_share_name_prefix-$net-$is_addr"
         is_info_str=($is_protocol $is_addr $port $uuid $password tls h3 true bbr)
         ;;
     reality)
@@ -1646,20 +1640,20 @@ info() {
             is_info_show=(${is_info_show[@]/15/})
         }
         is_info_str=($is_protocol $is_addr $port $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key)
-        is_url="$is_protocol://$uuid@$is_addr:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#233boy-$net-$is_addr"
+        is_url="$is_protocol://$uuid@$is_addr:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$is_share_name_prefix-$net-$is_addr"
         ;;
     anytls)
         is_can_change=(0 1 4)
         if [[ $is_anytls_domain ]]; then
             is_info_show=(0 1 2 10 8)
             is_info_str=($is_protocol $is_anytls_domain $port $password tls)
-            is_url="anytls://$password@$is_anytls_domain:$port#233boy-$net-$is_anytls_domain"
+            is_url="anytls://$password@$is_anytls_domain:$port#$is_share_name_prefix-$net-$is_anytls_domain"
         else
             is_insecure=1
             is_can_change+=(13)
             is_info_show=(0 1 2 10 8 20)
             is_info_str=($is_protocol $is_addr $port $password tls true)
-            is_url="anytls://$password@$is_addr:$port?insecure=1&allowInsecure=1#233boy-$net-$is_addr"
+            is_url="anytls://$password@$is_addr:$port?insecure=1&allowInsecure=1#$is_share_name_prefix-$net-$is_addr"
         fi
         ;;
     direct)
@@ -1671,7 +1665,7 @@ info() {
         is_can_change=(0 1 12 4 13)
         is_info_show=(0 1 2 19 10)
         is_info_str=($is_protocol $is_addr $port $is_socks_user $is_socks_pass)
-        is_url="socks://$(echo -n ${is_socks_user}:${is_socks_pass} | base64 -w 0)@${is_addr}:${port}#233boy-$net-${is_addr}"
+        is_url="socks://$(echo -n ${is_socks_user}:${is_socks_pass} | base64 -w 0)@${is_addr}:${port}#$is_share_name_prefix-$net-${is_addr}"
         ;;
     esac
     [[ $is_dont_show_info || $is_gen || $is_dont_auto_exit ]] && return # dont show info
@@ -1686,7 +1680,7 @@ info() {
         msg "$a $tt= \e[${is_color}m${is_info_str[$i]}\e[0m"
     done
     if [[ $is_new_install ]]; then
-        warn "首次安装请查看脚本帮助文档: $(msg_ul https://233boy.com/$is_core/$is_core-script/)"
+        warn "首次安装请查看脚本帮助文档: $(msg_ul $is_doc_url)"
     fi
     if [[ $is_url ]]; then
         msg "------------- ${info_list[12]} -------------"
@@ -1699,7 +1693,7 @@ info() {
         msg "------------- no-auto-tls INFO -------------"
         msg "端口(port): $port"
         msg "路径(path): $path"
-        msg "\e[41m帮助(help)\e[0m: $(msg_ul https://233boy.com/$is_core/no-auto-tls/)"
+        msg "\e[41m帮助(help)\e[0m: $(msg_ul $is_no_auto_tls_doc_url)"
     fi
     footer_msg
 }
@@ -1708,13 +1702,9 @@ info() {
 footer_msg() {
     [[ $is_core_stop && ! $is_new_json ]] && warn "$is_core_name 当前处于停止状态."
     [[ $is_caddy_stop && $host ]] && warn "Caddy 当前处于停止状态."
-    ####### 要点13脸吗只会改我链接的小人 #######
-    unset c n m s b
     msg "------------- END -------------"
-    msg "关注(tg): $(msg_ul https://t.me/tg2333)"
-    msg "文档(doc): $(msg_ul https://233boy.com/$is_core/$is_core-script/)"
-    msg "推广(ads): 机场推荐($is_core_name services): $(msg_ul https://g${c}e${n}t${m}j${s}m${b}s.com/)\n"
-    ####### 要点13脸吗只会改我链接的小人 #######
+    msg "文档(doc): $(msg_ul $is_doc_url)"
+    msg "反馈(issue): $(msg_ul https://github.com/${is_sh_repo}/issues)\n"
 }
 
 # URL or qrcode
@@ -1727,8 +1717,8 @@ url_qr() {
             msg "\n\e[${is_color}m${is_url}\e[0m\n"
             footer_msg
         } || {
-            link="https://233boy.github.io/tools/qr.html#${is_url}"
             msg "\n------------- $is_config_name & QR code 二维码 -------------"
+            msg "\n\e[${is_color}m${is_url}\e[0m\n"
             msg
             if [[ $(type -P qrencode) ]]; then
                 qrencode -t ANSI "${is_url}"
@@ -1736,8 +1726,7 @@ url_qr() {
                 msg "请安装 qrencode: $(_green "$cmd update -y; $cmd install qrencode -y")"
             fi
             msg
-            msg "如果无法正常显示或识别, 请使用下面的链接来生成二维码:"
-            msg "\n\e[4;${is_color}m${link}\e[0m\n"
+            msg "如果无法正常显示或识别, 请复制上面的 URL 到客户端或本地二维码工具生成."
             footer_msg
         }
     else
@@ -1863,7 +1852,7 @@ cmd_json_provision() {
 # backup [--json] -> archive the sing-box config DATA (config.json + conf/, incl.
 # per-node .json and .addr sidecars) to /opt/lattice/.archive_backup/ as a
 # timestamped tarball. Works on any install — including nodes deployed by hand or
-# by the interactive 233boy flow — because it archives whatever is on disk.
+# by the interactive script flow — because it archives whatever is on disk.
 cmd_backup() {
     local dir=/opt/lattice/.archive_backup
     local items=()
@@ -1980,9 +1969,9 @@ pass_args() {
 
 # main menu; if no prefer args.
 is_main_menu() {
-    msg "\n------------- $is_core_name script $is_sh_ver by $author -------------"
+    msg "\n------------- $is_core_name script $is_sh_ver by ${display_author:-$author} -------------"
     msg "$is_core_name $is_core_ver: $is_core_status"
-    msg "群组(Chat): $(msg_ul https://t.me/tg233boy)"
+    msg "项目(Project): $(msg_ul ${is_project_url:-https://github.com/${is_sh_repo}})"
     is_main_start=1
     ask mainmenu
     case $REPLY in

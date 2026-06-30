@@ -1,6 +1,9 @@
 #!/bin/bash
 
+# Keep the legacy author namespace for compatibility with existing installs.
 author=233boy
+display_author=lr00rl
+origin_repo=233boy/sing-box
 # github=https://github.com/lr00rl/sing-box
 
 # bash fonts colors
@@ -99,6 +102,10 @@ is_log_dir=/var/log/$is_core
 is_sh_bin=/usr/local/bin/$is_core
 is_sh_dir=$is_core_dir/sh
 is_sh_repo=lr00rl/sing-box
+is_project_url=https://github.com/$is_sh_repo
+is_doc_url=$is_project_url#readme
+is_no_auto_tls_doc_url=$is_doc_url
+is_share_name_prefix=lr00rl
 is_pkg="wget unzip tar qrencode bash"
 is_config_json=$is_core_dir/config.json
 is_caddy_bin=/usr/local/bin/caddy

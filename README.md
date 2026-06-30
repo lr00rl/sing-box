@@ -1,64 +1,85 @@
-# 介绍
+# sing-box 自用一键脚本
 
-最好用的 sing-box 一键安装脚本 & 管理脚本
+这是我维护的 `sing-box` 安装与管理脚本。仓库从
+[233boy/sing-box](https://github.com/233boy/sing-box) fork 而来，感谢原项目提供的一键安装、协议生成、Caddy 自动 TLS 和日常管理的基础能力。
 
-# 特点
+本 fork 面向我自己的服务器和自动化部署流程维护。后续文档、安装源、Release 和问题反馈都以
+[lr00rl/sing-box](https://github.com/lr00rl/sing-box) 为准。
 
-- 快速安装
-- 无敌好用
-- 零学习成本
-- 自动化 TLS
-- 简化所有流程
-- 兼容 sing-box 命令
-- 强大的快捷参数
-- 支持所有常用协议
-- 一键添加 VLESS-REALITY (默认)
-- 一键添加 TUIC
-- 一键添加 Trojan
-- 一键添加 Hysteria2
-- 一键添加 AnyTLS
-- 一键添加 Shadowsocks 2022
-- 一键添加 VMess-(TCP/HTTP/QUIC)
-- 一键添加 VMess-(WS/H2/HTTPUpgrade)-TLS
-- 一键添加 VLESS-(WS/H2/HTTPUpgrade)-TLS
-- 一键添加 Trojan-(WS/H2/HTTPUpgrade)-TLS
-- 一键启用 BBR
-- 一键更改伪装网站
-- 一键更改 (端口/UUID/密码/域名/路径/加密方式/SNI/等...)
-- 还有更多...
+> 这不是 SagerNet/sing-box 官方项目。`sing-box` core 来自
+> [SagerNet/sing-box](https://github.com/SagerNet/sing-box)，本仓库只维护安装和管理脚本。
 
-# 设计理念
+## 主要改动
 
-设计理念为：**高效率，超快速，极易用**
+- 发布源切换到 `lr00rl/sing-box`，脚本更新从本仓库 Release 下载 `code.tar.gz`。
+- 安装阶段支持 `--server-addr` / `--addr` 手动指定连接地址，避免自动获取公网 IP 失败或拿到错误地址。
+- 支持 `-p` / `--proxy` 代理下载安装资源；公网 IP 探测会绕过代理直连，避免拿到代理出口 IP。
+- 运行时支持 `sb --addr <ip|domain> ...` 临时覆盖连接地址，并为配置保存 `.addr` sidecar。
+- 增加面向 Lattice / Probe-Dashboards 使用的 JSON 自动化接口，例如 `list`、`info --json`、`sub`、`provision`、`backup --json`。
+- 增加配置备份：`sb backup` 会归档 `/etc/sing-box/config.json` 和 `/etc/sing-box/conf/` 到 `/opt/lattice/.archive_backup/`。
+- 去掉脚本帮助、页脚、分享链接标签里的上游展示信息；只在 README 和 `about` 中保留 fork 来源与致谢。
 
-脚本基于作者的自身使用需求，以 **多配置同时运行** 为核心设计
+## 功能范围
 
-并且专门优化了，添加、更改、查看、删除、这四项常用功能
+脚本会安装 `sing-box` core，并提供 `/usr/local/bin/sing-box` 和 `/usr/local/bin/sb` 两个命令入口。默认首次安装会创建一个 VLESS-REALITY 配置。
 
-你只需要一条命令即可完成 添加、更改、查看、删除、等操作
+支持的常用协议包括：
 
-例如，添加一个配置仅需不到 1 秒！瞬间完成添加！其他操作亦是如此！
+- VLESS-REALITY / VLESS-HTTP2-REALITY
+- AnyTLS
+- TUIC
+- Trojan
+- Hysteria2
+- Shadowsocks / Shadowsocks 2022
+- VMess TCP / HTTP / QUIC / WS / H2 / HTTPUpgrade
+- VMess / VLESS / Trojan 的 WS/H2/HTTPUpgrade + TLS
+- Socks
 
-脚本的参数非常高效率并且超级易用，请掌握参数的使用
+支持的管理能力包括：
 
-# 文档
+- 添加、修改、删除、查看节点配置
+- 输出分享 URL 或二维码
+- 自动配置 Caddy TLS
+- 更新 `sing-box` core、脚本和 Caddy
+- 启用 BBR
+- DNS、日志、服务启停、配置修复
+- JSON 输出，便于被控制面或自动化脚本调用
 
-安装及使用：https://233boy.com/sing-box/sing-box-script/
+## 系统要求
 
-本项目基于 [xykt/IPQuality](https://github.com/xykt/IPQuality) 进行了调整，主要解决部分机器在安装阶段无法正常获取 IP 的问题，并支持传入自定义 IP 或域名作为连接地址。
+- root 用户
+- 64 位 Linux：`amd64/x86_64` 或 `arm64/aarch64`
+- 包管理器：`apt-get`、`yum`、`zypper` 或 `apk`
+- 服务管理：systemd 或 OpenRC
+- 可访问 GitHub Release；网络受限时建议使用代理安装
 
-远程安装请使用 raw 地址，不要使用 GitHub 的 `blob` 页面地址。
+## 快速安装
 
-标准安装命令：
+远程安装必须使用 raw 地址，不要使用 GitHub 的 `blob` 页面地址。
 
-- `bash <(curl -fsSL https://github.com/lr00rl/sing-box/raw/main/install.sh)`
-- `bash <(curl -fsSL https://github.com/lr00rl/sing-box/raw/main/install.sh) --server-addr 1.2.3.4`
-- `bash <(curl -fsSL https://github.com/lr00rl/sing-box/raw/main/install.sh) --server-addr example.com`
+```bash
+bash <(curl -fsSL https://github.com/lr00rl/sing-box/raw/main/install.sh)
+```
 
-代理安装命令：
+如果自动获取服务器公网 IP 失败，或你希望客户端连接到指定 IP/域名：
 
-`install.sh` 支持通过 `-p` 或 `--proxy` 指定代理。首次拉取安装脚本本身也需要走代理时，可使用下面的写法：
-代理只用于下载安装资源；自动获取服务器公网 IP 时会直连探测，避免拿到代理出口 IP。
+```bash
+bash <(curl -fsSL https://github.com/lr00rl/sing-box/raw/main/install.sh) --server-addr 1.2.3.4
+bash <(curl -fsSL https://github.com/lr00rl/sing-box/raw/main/install.sh) --server-addr example.com
+```
+
+也可以指定 `sing-box` core 版本或本地 core 包：
+
+```bash
+bash <(curl -fsSL https://github.com/lr00rl/sing-box/raw/main/install.sh) --core-version v1.12.0
+bash install.sh --core-file /root/sing-box-linux-amd64.tar.gz
+```
+
+## 代理安装
+
+`install.sh` 的 `-p` / `--proxy` 只用于下载脚本包、core、jq 等资源。脚本探测服务器公网 IP 时会直连，避免把代理出口当成节点地址。
+
+首次拉取安装脚本本身也需要走代理时，用下面的写法：
 
 ```bash
 PROXY='socks5h://USER:PASS@HOST:PORT'
@@ -72,103 +93,190 @@ export ALL_PROXY="$PROXY"
 
 bash <(curl -fsSL --proxy "$PROXY" \
   https://github.com/lr00rl/sing-box/raw/main/install.sh) \
-  -p "$PROXY"
+  --proxy "$PROXY"
 ```
 
-如需同时指定连接地址：
+代理安装并同时指定连接地址：
 
 ```bash
 bash <(curl -fsSL --proxy "$PROXY" \
   https://github.com/lr00rl/sing-box/raw/main/install.sh) \
-  -p "$PROXY" --server-addr example.com
+  --proxy "$PROXY" --server-addr example.com
 ```
 
-如果仓库 Release 中不存在 `code.tar.gz`，远程安装会在下载脚本包时失败；这种情况下可先下载源码后使用本地模式安装：`bash install.sh -l`
+## 本地安装
 
-安装时如果自动获取 IP 失败，或你希望直接指定连接地址，可执行：
+如果 Release 中暂时没有 `code.tar.gz`，远程安装会在下载脚本包时失败。可以先下载源码，再使用本地模式安装：
 
-- `bash install.sh --server-addr 1.2.3.4`
-- `bash install.sh --server-addr example.com`
-
-脚本运行时也支持临时指定连接地址，例如：
-
-- `sb --addr 1.2.3.4 add reality 40572`
-- `sb --addr example.com`
-
-如果在交互式添加配置时自动获取 IP 失败，脚本现在也会提示手动输入连接地址继续创建。
-
-发布说明：
-
-- 仓库发布源使用 `lr00rl/sing-box`
-- GitHub Actions 会在 `main` 分支 push 后自动刷新当前版本号对应的 Release，并更新 `code.tar.gz`
-- 如果希望已安装机器通过 `sb update sh` 检测到新版本，请同步更新 `sing-box.sh` 中的 `is_sh_ver`
-
-# 帮助
-
-使用：`sing-box help`
-
+```bash
+git clone https://github.com/lr00rl/sing-box.git
+cd sing-box
+bash install.sh --local-install
 ```
-sing-box script v1.0 by 233boy
-Usage: sing-box [options]... [args]...
 
-基本:
-   v, version                                      显示当前版本
-   ip                                              返回当前主机的 IP
-   pbk                                             同等于 sing-box generate reality-keypair
-   get-port                                        返回一个可用的端口
-   ss2022                                          返回一个可用于 Shadowsocks 2022 的密码
+本地模式也支持指定连接地址：
 
-一般:
-   a, add [protocol] [args... | auto]              添加配置
-   c, change [name] [option] [args... | auto]      更改配置
-   d, del [name]                                   删除配置**
-   i, info [name]                                  查看配置
-   qr [name]                                       二维码信息
-   url [name]                                      URL 信息
-   log                                             查看日志
-更改:
-   full [name] [...]                               更改多个参数
-   addr [name] [ip | domain | auto]                更改连接地址
-   id [name] [uuid | auto]                         更改 UUID
-   host [name] [domain]                            更改域名
-   port [name] [port | auto]                       更改端口
-   path [name] [path | auto]                       更改路径
-   passwd [name] [password | auto]                 更改密码
-   key [name] [Private key | auto] [Public key]    更改密钥
-   method [name] [method | auto]                   更改加密方式
-   sni [name] [ ip | domain]                       更改 serverName
-   new [name] [...]                                更改协议
-   web [name] [domain]                             更改伪装网站
-
-进阶:
-   dns [...]                                       设置 DNS
-   dd, ddel [name...]                              删除多个配置**
-   fix [name]                                      修复一个配置
-   fix-all                                         修复全部配置
-   fix-caddyfile                                   修复 Caddyfile
-   fix-config.json                                 修复 config.json
-   import                                          导入 sing-box/v2ray 脚本配置
-
-管理:
-   un, uninstall                                   卸载
-   u, update [core | sh | caddy] [ver]             更新
-   U, update.sh                                    更新脚本
-   s, status                                       运行状态
-   start, stop, restart [caddy]                    启动, 停止, 重启
-   t, test                                         测试运行
-   reinstall                                       重装脚本
-
-测试:
-   debug [name]                                    显示一些 debug 信息, 仅供参考
-   gen [...]                                       同等于 add, 但只显示 JSON 内容, 不创建文件, 测试使用
-   no-auto-tls [...]                               同等于 add, 但禁止自动配置 TLS, 可用于 *TLS 相关协议
-其他:
-   bbr                                             启用 BBR, 如果支持
-   bin [...]                                       运行 sing-box 命令, 例如: sing-box bin help
-   [...] [...]                                     兼容绝大多数的 sing-box 命令, 例如: sing-box generate uuid
-   h, help                                         显示此帮助界面
-
-谨慎使用 del, ddel, 此选项会直接删除配置; 无需确认
-反馈问题) https://github.com/lr00rl/sing-box/issues
-文档(doc) https://233boy.com/sing-box/sing-box-script/
+```bash
+bash install.sh --local-install --server-addr example.com
 ```
+
+## 常用命令
+
+安装完成后优先使用 `sb`，也可以使用完整命令 `sing-box`。
+
+```bash
+sb help
+sb status
+sb version
+sb info
+sb url
+sb qr
+```
+
+添加配置：
+
+```bash
+sb add reality
+sb add reality 40572
+sb add reality 40572 auto www.microsoft.com
+sb add anytls
+sb add anytls 8443 auto example.com
+sb add tuic
+sb add trojan
+sb add hy2
+sb add ss
+sb add socks
+```
+
+修改和删除配置：
+
+```bash
+sb change <name>
+sb addr <name> example.com
+sb port <name> 443
+sb sni <name> www.microsoft.com
+sb del <name>
+```
+
+`del` / `ddel` 会直接删除配置，不会再次确认，执行前确认参数。
+
+运行管理：
+
+```bash
+sb status
+sb start
+sb stop
+sb restart
+sb log
+sb test
+```
+
+更新：
+
+```bash
+sb update core
+sb update sh
+sb update caddy
+sb update core v1.12.0
+```
+
+卸载：
+
+```bash
+sb uninstall
+```
+
+## 连接地址
+
+脚本会自动探测服务器公网 IP。以下情况建议手动指定连接地址：
+
+- 服务器只有内网 IP，但对外通过公网 IP、DDNS 或域名访问。
+- 自动探测公网 IP 失败。
+- 安装时使用代理，但客户端应该连接服务器本机地址而不是代理出口。
+- 同一台机器上的不同配置需要展示不同连接地址。
+
+安装阶段：
+
+```bash
+bash install.sh --server-addr 1.2.3.4
+bash install.sh --server-addr example.com
+```
+
+运行阶段：
+
+```bash
+sb --addr 1.2.3.4 add reality 40572
+sb --addr example.com add tuic
+```
+
+为单个配置修改连接地址：
+
+```bash
+sb addr <name> 1.2.3.4
+sb addr <name> example.com
+sb addr <name> auto
+```
+
+指定的地址会保存到对应配置的 `.addr` sidecar；使用 `auto` 会回到自动探测。
+
+## JSON 自动化接口
+
+这些命令用于控制面、脚本或自动化系统读取状态，输出结构化 JSON。
+
+```bash
+sb list
+sb list reality
+sb --json info <name>
+sb sub
+sb provision
+sb --json backup
+```
+
+添加、修改、删除也可以配合 `--json`：
+
+```bash
+sb --addr example.com --json add reality 40572
+sb --json change <name> port 443
+sb --json del <name>
+```
+
+常见返回：
+
+- `list`：`{ok,count,nodes:[...]}`
+- `info --json`：`{ok,node:{...}}`
+- `sub`：`{ok,count,plain,base64}`
+- `provision`：`{ok,installed,version,service_active}`
+- `backup --json`：`{ok,archive,bytes,nodes}`
+
+在 `--json` 模式下，如果命令需要交互输入但参数不完整，脚本会返回结构化错误，而不是进入 TTY 提问。
+
+## 文件位置
+
+- 脚本目录：`/etc/sing-box/sh`
+- core：`/etc/sing-box/bin/sing-box`
+- 主配置：`/etc/sing-box/config.json`
+- 节点配置：`/etc/sing-box/conf/*.json`
+- 节点连接地址 sidecar：`/etc/sing-box/conf/*.addr`
+- 日志目录：`/var/log/sing-box`
+- 命令入口：`/usr/local/bin/sing-box`、`/usr/local/bin/sb`
+- 备份目录：`/opt/lattice/.archive_backup/`
+
+出于兼容已安装节点的考虑，部分内部路径仍保留上游脚本的历史命名空间，例如 Caddy 配置目录可能继续使用旧路径。这个兼容细节不影响对外展示、安装源或使用方式。
+
+## 发布与维护
+
+- 脚本版本写在 `sing-box.sh` 的 `is_sh_ver`。
+- GitHub Actions 会在 `main` 分支 push 后读取 `is_sh_ver`，生成/更新同名 Release。
+- Release 资产 `code.tar.gz` 是远程安装和 `sb update sh` 使用的脚本包。
+- 如果修改脚本逻辑并希望已安装机器检测到更新，需要同步提升 `is_sh_ver`。
+- 安装脚本里的 `is_sh_repo` 指向 `lr00rl/sing-box`。
+
+## 反馈
+
+问题反馈到本仓库：
+
+https://github.com/lr00rl/sing-box/issues
+
+上游脚本来源：
+
+https://github.com/233boy/sing-box
