@@ -1951,6 +1951,210 @@ cmd_json_info() {
     exit 0
 }
 
+conncheck_now_ms() {
+    local now
+    now=$(date +%s%3N 2>/dev/null)
+    [[ $now =~ ^[0-9]+$ ]] || now=$(($(date +%s) * 1000))
+    printf '%s' "$now"
+}
+
+conncheck_tail_file() {
+    local file=$1
+    [[ -s $file ]] || return 0
+    tail -n 20 "$file" 2>/dev/null
+}
+
+conncheck_outbound_json() {
+    local raw_file=$1 server=$2 server_port=$3
+    jq -c --arg server "$server" --argjson server_port "$server_port" '
+        def compact_obj:
+            with_entries(select(.value != "" and .value != null and .value != [] and .value != {}));
+        def compact_deep:
+            walk(if type == "object" then compact_obj else . end);
+        .inbounds[0] as $in
+        | ($in.type // "") as $type
+        | ([.outbounds[]? | (.tag // "") | select(startswith("public_key_")) | sub("^public_key_"; "")][0] // "") as $reality_public_key
+        | ($in.tls.server_name // $in.tls.reality.handshake.server // $server) as $server_name
+        | if $type == "vless" then
+            if (($in.tls.reality.enabled // false) and $reality_public_key == "") then null else {
+                type:"vless",
+                tag:"line-check",
+                server:$server,
+                server_port:$server_port,
+                uuid:($in.users[0].uuid // ""),
+                flow:($in.users[0].flow // ""),
+                tls:(if ($in.tls.enabled // false) then ({
+                    enabled:true,
+                    server_name:$server_name,
+                    insecure:true,
+                    reality:(if ($in.tls.reality.enabled // false) then {
+                        enabled:true,
+                        public_key:$reality_public_key,
+                        short_id:(($in.tls.reality.short_id // [""])[0] // "")
+                    } else null end),
+                    utls:(if ($in.tls.reality.enabled // false) then {enabled:true,fingerprint:"chrome"} else null end)
+                } | compact_deep) else null end)
+            } | compact_deep end
+        elif $type == "trojan" then {
+            type:"trojan",
+            tag:"line-check",
+            server:$server,
+            server_port:$server_port,
+            password:($in.users[0].password // $in.password // ""),
+            tls:(if ($in.tls.enabled // false) then {enabled:true,server_name:$server_name,insecure:true} else null end)
+        } | compact_deep
+        elif $type == "hysteria2" then {
+            type:"hysteria2",
+            tag:"line-check",
+            server:$server,
+            server_port:$server_port,
+            password:($in.users[0].password // $in.password // ""),
+            tls:{enabled:true,server_name:$server_name,insecure:true,alpn:["h3"]}
+        } | compact_deep
+        elif $type == "shadowsocks" then {
+            type:"shadowsocks",
+            tag:"line-check",
+            server:$server,
+            server_port:$server_port,
+            method:($in.method // ""),
+            password:($in.password // "")
+        } | compact_deep
+        elif $type == "anytls" then {
+            type:"anytls",
+            tag:"line-check",
+            server:$server,
+            server_port:$server_port,
+            password:($in.users[0].password // $in.password // ""),
+            tls:{enabled:true,server_name:$server_name,insecure:true}
+        } | compact_deep
+        elif $type == "socks" then {
+            type:"socks",
+            tag:"line-check",
+            server:$server,
+            server_port:$server_port,
+            username:($in.users[0].username // ""),
+            password:($in.users[0].password // "")
+        } | compact_deep
+        else null end
+    ' "$raw_file"
+}
+
+# conncheck <name> [url] [timeout_sec] -> run a temporary local sing-box client
+# for one line and curl the URL through it. The temporary config is deleted and
+# never printed because it contains credential material derived from the line.
+cmd_json_conncheck() {
+    is_json_out=1
+    local name="$1" url="$2" timeout_sec="$3"
+    [[ ! $name ]] && json_err "missing_name" "conncheck --json requires a line name" 2
+    [[ ! $url ]] && url="https://www.cloudflare.com/cdn-cgi/trace"
+    [[ ${#url} -le 2048 && $url != *[[:space:]]* && ( $url == http://* || $url == https://* ) ]] || json_err "invalid_url" "conncheck url must be http(s)" 2
+    [[ $timeout_sec ]] || timeout_sec=10
+    [[ $timeout_sec =~ ^[0-9]+$ && $timeout_sec -ge 2 && $timeout_sec -le 60 ]] || json_err "invalid_timeout" "timeout_sec must be 2-60" 2
+
+    local matches=() cleaned=() f
+    if [[ -f $is_conf_dir/$name ]]; then
+        matches=("$name")
+    elif [[ -f $is_conf_dir/$name.json ]]; then
+        matches=("$name.json")
+    elif [[ -d $is_conf_dir ]]; then
+        readarray -t matches <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -F -i -- "$name" | sed '/dynamic-port-.*-link/d')"
+    fi
+    for f in "${matches[@]}"; do
+        [[ $f && $f =~ \.json$ ]] && cleaned+=("$f")
+    done
+    [[ ${#cleaned[@]} -eq 0 ]] && json_err "not_found" "no line matches: $name" 2
+    [[ ${#cleaned[@]} -gt 1 ]] && json_err "ambiguous" "multiple lines match: $name" 2
+
+    is_config_file="${cleaned[0]}"
+    is_dont_show_info=1
+    is_dont_test_host=1
+    info "$is_config_file" >/dev/null 2>&1
+
+    local raw_file=$is_conf_dir/$is_config_file
+    [[ -f $raw_file ]] || json_err "not_found" "config file not found: $is_config_file" 2
+    local server=$is_addr
+    [[ $host ]] && server=$host
+    [[ $is_anytls_domain ]] && server=$is_anytls_domain
+    [[ $server ]] || json_err "missing_server" "cannot determine server address for $is_config_file" 2
+    local server_port=$port
+    [[ $host && $is_https_port ]] && server_port=$is_https_port
+    [[ $server_port =~ ^[0-9]+$ && $server_port -ge 1 && $server_port -le 65535 ]] || json_err "invalid_port" "cannot determine server port for $is_config_file" 2
+
+    local outbound
+    outbound=$(conncheck_outbound_json "$raw_file" "$server" "$server_port") || json_err "outbound_build_failed" "failed to build conncheck outbound" 2
+    [[ $outbound != "null" && $outbound != "" ]] || json_err "unsupported_protocol" "conncheck does not support this line protocol yet" 2
+
+    local old_port=$port
+    port=$server_port
+    get_port
+    local listen_port=$tmp_port
+    port=$old_port
+
+    local tmpdir config core_log curl_err body http_code start_ms end_ms latency_ms pid ok=false
+    tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/lattice-conncheck.XXXXXX") || json_err "tmpdir_failed" "cannot create temporary directory" 2
+    config=$tmpdir/config.json
+    core_log=$tmpdir/sing-box.log
+    curl_err=$tmpdir/curl.err
+    body=$tmpdir/body.out
+    jq -n --argjson listen_port "$listen_port" --argjson outbound "$outbound" '{
+        log:{level:"error"},
+        inbounds:[{type:"mixed",tag:"probe-in",listen:"127.0.0.1",listen_port:$listen_port}],
+        outbounds:[$outbound]
+    }' >"$config" || { rm -rf "$tmpdir"; json_err "config_failed" "failed to write temporary conncheck config" 2; }
+
+    "$is_core_bin" run -c "$config" >"$core_log" 2>&1 &
+    pid=$!
+    trap 'kill "$pid" 2>/dev/null || true; rm -rf "$tmpdir"' EXIT
+
+    start_ms=$(conncheck_now_ms)
+    local attempt
+    for attempt in $(seq 1 30); do
+        if http_code=$(curl -fsS --proxy "socks5h://127.0.0.1:$listen_port" --connect-timeout 3 --max-time "$timeout_sec" -o "$body" -w '%{http_code}' "$url" 2>"$curl_err"); then
+            ok=true
+            break
+        fi
+        if ! kill -0 "$pid" 2>/dev/null; then
+            break
+        fi
+        sleep 0.2
+    done
+    end_ms=$(conncheck_now_ms)
+    latency_ms=$((end_ms - start_ms))
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    trap - EXIT
+
+    if [[ $ok == true ]]; then
+        jq -nc \
+            --arg line "$is_config_file" \
+            --arg url "$url" \
+            --arg server "$server" \
+            --argjson server_port "$server_port" \
+            --argjson listen_port "$listen_port" \
+            --arg http_code "$http_code" \
+            --argjson latency_ms "$latency_ms" \
+            '{ok:true,line:$line,url:$url,server:$server,server_port:$server_port,local_proxy_port:$listen_port,http_code:$http_code,latency_ms:$latency_ms}'
+        rm -rf "$tmpdir"
+        exit 0
+    fi
+
+    local curl_message core_tail
+    curl_message=$(cat "$curl_err" 2>/dev/null)
+    core_tail=$(conncheck_tail_file "$core_log")
+    jq -nc \
+        --arg line "$is_config_file" \
+        --arg url "$url" \
+        --arg server "$server" \
+        --argjson server_port "$server_port" \
+        --argjson listen_port "$listen_port" \
+        --argjson latency_ms "$latency_ms" \
+        --arg curl_error "$curl_message" \
+        --arg core_log_tail "$core_tail" \
+        '{ok:false,error:"conncheck_failed",line:$line,url:$url,server:$server,server_port:$server_port,local_proxy_port:$listen_port,latency_ms:$latency_ms,curl_error:$curl_error,core_log_tail:$core_log_tail}'
+    rm -rf "$tmpdir"
+    exit 1
+}
+
 # sub -> {ok,count,plain,base64}  aggregate every node's share link (the missing aggregator)
 cmd_json_sub() {
     is_json_out=1
@@ -2198,6 +2402,9 @@ main() {
         ;;
     inspect)
         cmd_json_inspect "$2"
+        ;;
+    conncheck)
+        cmd_json_conncheck "$2" "$3" "$4"
         ;;
     a | add | gen | no-auto-tls)
         [[ $1 == 'gen' ]] && is_gen=1
