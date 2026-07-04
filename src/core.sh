@@ -1951,6 +1951,123 @@ cmd_json_info() {
     exit 0
 }
 
+json_resolve_config_file() {
+    local name="$1"
+    local matches=() cleaned=() f
+    [[ ! $name ]] && json_err "missing_name" "line name is required" 2
+    if [[ -f $is_conf_dir/$name ]]; then
+        matches=("$name")
+    elif [[ -f $is_conf_dir/$name.json ]]; then
+        matches=("$name.json")
+    elif [[ -d $is_conf_dir ]]; then
+        readarray -t matches <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -F -i -- "$name" | sed '/dynamic-port-.*-link/d')"
+    fi
+    for f in "${matches[@]}"; do
+        [[ $f && $f =~ \.json$ ]] && cleaned+=("$f")
+    done
+    [[ ${#cleaned[@]} -eq 0 ]] && json_err "not_found" "no line matches: $name" 2
+    [[ ${#cleaned[@]} -gt 1 ]] && json_err "ambiguous" "multiple lines match: $name" 2
+    printf '%s' "${cleaned[0]}"
+}
+
+json_line_user_obj() {
+    local raw_file="$1" payload="$2"
+    jq -nc --slurpfile cfg "$raw_file" --argjson p "$payload" '
+        def compact_obj:
+            with_entries(select(.value != "" and .value != null and .value != [] and .value != {}));
+        ($cfg[0].inbounds[0].type // "") as $type
+        | if ($type == "vless" or $type == "vmess") then
+            {uuid:($p.uuid // ""), flow:($p.flow // "")} | compact_obj
+          elif ($type == "tuic") then
+            {uuid:($p.uuid // ""), password:($p.password // "")} | compact_obj
+          elif ($type == "trojan" or $type == "hysteria2" or $type == "anytls") then
+            {password:($p.password // "")} | compact_obj
+          elif ($type == "socks") then
+            {username:($p.username // $p.email // $p.user_id // ""), password:($p.password // "")} | compact_obj
+          else
+            null
+          end
+    '
+}
+
+json_line_user_valid() {
+    local user_json="$1"
+    jq -e '
+        type == "object" and (
+            ((.uuid // "") != "") or
+            ((.password // "") != "") or
+            (((.username // "") != "") and ((.password // "") != ""))
+        )
+    ' >/dev/null <<<"$user_json"
+}
+
+json_line_user_matches_filter='
+    def same_nonempty($a; $b): (($a // "") != "" and ($a // "") == ($b // ""));
+    (same_nonempty(.uuid; $user.uuid)
+     or same_nonempty(.username; $user.username)
+     or same_nonempty(.password; $user.password))
+'
+
+json_write_config_atomically() {
+    local raw_file="$1" filter="$2" user_json="$3"
+    local tmp backup errf
+    tmp=$(mktemp "${TMPDIR:-/tmp}/lattice-sb-user.XXXXXX") || json_err "tmp_failed" "cannot create temp file" 2
+    backup="$raw_file.backup-$(date -u +%Y%m%d-%H%M%S)"
+    errf=$(mktemp "${TMPDIR:-/tmp}/lattice-sb-check.XXXXXX") || { rm -f "$tmp"; json_err "tmp_failed" "cannot create temp file" 2; }
+    cp -p "$raw_file" "$backup" || { rm -f "$tmp" "$errf"; json_err "backup_failed" "cannot backup $raw_file" 2; }
+    if ! jq --argjson user "$user_json" "$filter" "$raw_file" >"$tmp"; then
+        rm -f "$tmp" "$errf"
+        json_err "jq_failed" "failed to update $raw_file" 2
+    fi
+    mv "$tmp" "$raw_file" || { rm -f "$tmp" "$errf"; json_err "write_failed" "failed to replace $raw_file" 2; }
+    if ! "$is_core_bin" check -c "$raw_file" >"$errf" 2>&1; then
+        mv "$backup" "$raw_file" 2>/dev/null || true
+        local check_error
+        check_error=$(tail -n 20 "$errf" 2>/dev/null)
+        rm -f "$errf"
+        jq -nc --arg error "config_invalid" --arg message "sing-box rejected updated config; rolled back" --arg detail "$check_error" \
+            '{ok:false,error:$error,message:$message,detail:$detail}'
+        exit 1
+    fi
+    rm -f "$errf"
+}
+
+# user add|del <line> <payload-json> -> mutate one inbound's user list.
+cmd_json_user() {
+    is_json_out=1
+    local op="$1" name="$2" payload="$3"
+    [[ $op == "add" || $op == "del" ]] || json_err "invalid_action" "user action must be add or del" 2
+    [[ $payload ]] || json_err "missing_payload" "user payload json is required" 2
+    jq -e . >/dev/null <<<"$payload" || json_err "invalid_payload" "user payload must be valid json" 2
+
+    local config_file raw_file user_json filter count_before count_after
+    config_file=$(json_resolve_config_file "$name")
+    raw_file="$is_conf_dir/$config_file"
+    [[ -f $raw_file ]] || json_err "not_found" "config file not found: $config_file" 2
+    user_json=$(json_line_user_obj "$raw_file" "$payload") || json_err "payload_failed" "failed to derive sing-box user object" 2
+    [[ $user_json != "null" && $user_json ]] || json_err "unsupported_protocol" "this line protocol does not support dashboard user mutation" 2
+    json_line_user_valid "$user_json" || json_err "invalid_user" "payload does not contain the credential required by this line" 2
+
+    count_before=$(jq '(.inbounds[0].users // []) | length' "$raw_file" 2>/dev/null)
+    [[ $count_before =~ ^[0-9]+$ ]] || count_before=0
+    if [[ $op == "add" ]]; then
+        filter='
+            .inbounds[0].users = (((.inbounds[0].users // []) | map(select(('"$json_line_user_matches_filter"') | not))) + [$user])
+        '
+    else
+        filter='
+            .inbounds[0].users = ((.inbounds[0].users // []) | map(select(('"$json_line_user_matches_filter"') | not)))
+        '
+    fi
+    json_write_config_atomically "$raw_file" "$filter" "$user_json"
+    count_after=$(jq '(.inbounds[0].users // []) | length' "$raw_file" 2>/dev/null)
+    [[ $count_after =~ ^[0-9]+$ ]] || count_after=0
+    manage restart "$is_core" >/dev/null 2>&1 || true
+    jq -nc --arg action "$op" --arg line "$config_file" --argjson before "$count_before" --argjson after "$count_after" \
+        '{ok:true,action:$action,line:$line,user_count_before:$before,user_count_after:$after}'
+    exit 0
+}
+
 conncheck_now_ms() {
     local now
     now=$(date +%s%3N 2>/dev/null)
@@ -2405,6 +2522,9 @@ main() {
         ;;
     conncheck)
         cmd_json_conncheck "$2" "$3" "$4"
+        ;;
+    user)
+        cmd_json_user "$2" "$3" "$4"
         ;;
     a | add | gen | no-auto-tls)
         [[ $1 == 'gen' ]] && is_gen=1
