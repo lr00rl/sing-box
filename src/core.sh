@@ -2040,8 +2040,14 @@ cmd_json_user() {
     [[ $payload ]] || json_err "missing_payload" "user payload json is required" 2
     jq -e . >/dev/null <<<"$payload" || json_err "invalid_payload" "user payload must be valid json" 2
 
-    local config_file raw_file user_json filter count_before count_after
-    config_file=$(json_resolve_config_file "$name")
+    local config_file resolve_out resolve_rc raw_file user_json filter count_before count_after
+    resolve_out=$(json_resolve_config_file "$name")
+    resolve_rc=$?
+    if [[ $resolve_rc != 0 ]]; then
+        printf '%s\n' "$resolve_out"
+        exit "$resolve_rc"
+    fi
+    config_file="$resolve_out"
     raw_file="$is_conf_dir/$config_file"
     [[ -f $raw_file ]] || json_err "not_found" "config file not found: $config_file" 2
     user_json=$(json_line_user_obj "$raw_file" "$payload") || json_err "payload_failed" "failed to derive sing-box user object" 2
