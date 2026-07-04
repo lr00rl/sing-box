@@ -263,12 +263,45 @@ sb --json del <name>
 - `list`：`{ok,count,nodes:[...]}`
 - `inspect --json`：`{ok,count,lines:[...]}`
 - `inspect <name> --json`：`{ok,line:{core,tag,type,listen_host,listen_port,users,outbound,domain,metadata}}`
-- `info --json`：`{ok,node:{...}}`
+- `info --json`：`{ok,node:{...}}`；当 sidecar 记录了节点身份时，附带 `lattice_node:{node_uuid,node_id,purity_percent,quality}`
 - `sub`：`{ok,count,plain,base64}`
 - `provision`：`{ok,installed,version,service_active}`
 - `backup --json`：`{ok,archive,bytes,nodes}`
 
 在 `--json` 模式下，如果命令需要交互输入但参数不完整，脚本会返回结构化错误，而不是进入 TTY 提问。
+
+### Lattice 身份元数据 sidecar
+
+节点与线路身份（`node_uuid`、`node_id`、每条线路的 `line_id` 等）保存在
+**`/etc/sing-box/lattice-metadata.json`** 这个 sidecar 文件里，**不再写入** `conf/*.json`
+配置文件。原因：sing-box 会以 `DisallowUnknownFields` 严格解析 `config.json`（`-c`）
+以及每个 `conf/*.json`（`-C`），任何未知字段（例如旧版的 `_lattice`）都会导致
+`sing-box check` / 服务启动 **直接失败** 并使节点崩溃重启；因此身份数据必须放在
+服务永远不会读取的 `conf/` 之外。
+
+sidecar 结构：
+
+```json
+{
+  "version": 1,
+  "node": { "node_uuid": "...", "node_id": "...", "purity_percent": 98, "quality": "high" },
+  "lines": { "<conf-filename>.json": { "line_id": "<uuid>" } }
+}
+```
+
+`add` / `create` 时通过以下环境变量写入 sidecar（供 Lattice 自动化部署使用）：
+
+- `LATTICE_IDENTITY_UUID`：节点身份 UUID，设置后才会写入 sidecar 元数据。
+- `LATTICE_NODE_ID`：节点 ID。
+- `LATTICE_LINE_ID`：手动指定线路 ID；默认自动生成，且在改端口/协议、重建配置等
+  操作后 **保持不变**（`line_id` 跟随线路，按配置文件名迁移）。
+- `LATTICE_NODE_PURITY`：节点纯净度，0-100 的整数；非法值只会告警并跳过，不会中断创建。
+- `LATTICE_NODE_QUALITY`：节点质量等级（短字符串）。
+
+`list` / `inspect` / `info --json` 的输出形态保持不变：读取路径优先取 sidecar，
+并对仍携带旧版 `_lattice` 配置的节点自动回退读取以完成迁移，因此
+`metadata.{line_id,node_uuid,node_id}` 等对外字段与之前完全一致。删除线路会同时清理
+其 sidecar 条目；`sb backup` 也会一并归档 `lattice-metadata.json`。
 
 ## 文件位置
 
@@ -277,6 +310,7 @@ sb --json del <name>
 - 主配置：`/etc/sing-box/config.json`
 - 节点配置：`/etc/sing-box/conf/*.json`
 - 节点连接地址 sidecar：`/etc/sing-box/conf/*.addr`
+- Lattice 身份元数据 sidecar：`/etc/sing-box/lattice-metadata.json`（在 `conf/` 之外，服务不解析）
 - 日志目录：`/var/log/sing-box`
 - 命令入口：`/usr/local/bin/sing-box`、`/usr/local/bin/sb`
 - 备份目录：`/opt/lattice/.archive_backup/`
