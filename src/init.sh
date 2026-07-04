@@ -108,6 +108,10 @@ is_no_auto_tls_doc_url=$is_doc_url
 is_share_name_prefix=lr00rl
 is_pkg="wget unzip tar qrencode bash"
 is_config_json=$is_core_dir/config.json
+# Lattice node/line identity sidecar (design-09 §E.2). Kept OUTSIDE conf/ because
+# the service loads config.json (-c) plus every conf/*.json (-C) with
+# DisallowUnknownFields, so identity metadata cannot live inside those configs.
+is_lattice_meta=$is_core_dir/lattice-metadata.json
 is_caddy_bin=/usr/local/bin/caddy
 is_caddy_dir=/etc/caddy
 is_caddy_repo=caddyserver/caddy
