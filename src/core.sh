@@ -510,6 +510,19 @@ create() {
         [[ $is_change || ! $json_str ]] && get protocol $2
         [[ $net == "reality" ]] && is_add_public_key=",outbounds:[{type:\"direct\"},{tag:\"public_key_$is_public_key\",type:\"direct\"}]"
         is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port,$json_str}]$is_add_public_key}" <<<{})
+        if [[ $LATTICE_IDENTITY_UUID ]]; then
+            is_lattice_line_id=$LATTICE_LINE_ID
+            [[ ! $is_lattice_line_id && $is_config_file && -f $is_config_file ]] && is_lattice_line_id=$(jq -r '.inbounds[0]._lattice.line_id // empty' "$is_config_file" 2>/dev/null)
+            [[ ! $is_lattice_line_id && -f $is_json_file ]] && is_lattice_line_id=$(jq -r '.inbounds[0]._lattice.line_id // empty' "$is_json_file" 2>/dev/null)
+            [[ ! $is_lattice_line_id ]] && get_uuid && is_lattice_line_id=$tmp_uuid
+            is_new_json=$(jq \
+                --arg node_uuid "$LATTICE_IDENTITY_UUID" \
+                --arg line_id "$is_lattice_line_id" \
+                --arg node_id "$LATTICE_NODE_ID" \
+                '.inbounds[0]._lattice.node_uuid=$node_uuid
+                 | .inbounds[0]._lattice.line_id=$line_id
+                 | if $node_id != "" then .inbounds[0]._lattice.node_id=$node_id else . end' <<<$is_new_json)
+        fi
         [[ $is_test_json ]] && return # tmp test
         # only show json, dont save to file.
         [[ $is_gen ]] && {
@@ -1747,6 +1760,25 @@ json_node_obj() {
     [[ $host && $is_https_port ]] && eff_port=$is_https_port
     local pass=$password
     [[ ! $pass && $ss_password ]] && pass=$ss_password
+    local raw_file=$is_conf_dir/$is_config_name
+    local enrich='{}'
+    if [[ -f $raw_file ]]; then
+        enrich=$(jq -c --arg tag "$is_config_name" '
+            def compact_obj:
+                with_entries(select(.value != "" and .value != null and .value != [] and .value != {}));
+            .inbounds[0] as $in
+            | ($in._lattice // {}) as $lattice
+            | (($lattice // {}) | with_entries(select((.value | type) == "string" and .value != ""))) as $metadata
+            | ({
+                line_id:($lattice.line_id // ""),
+                node_identity_uuid:($lattice.node_uuid // ""),
+                listen_host:($in.listen // ""),
+                outbound_ref:([(.route.rules // [])[]? | select(((.inbound // []) | index($tag)) != null) | .outbound][0] // "")
+            } | compact_obj)
+            + (if (($in.users? | type) == "array") then {user_count:($in.users | length), user_known:true} else {} end)
+            + (if ($metadata | length) > 0 then {metadata:$metadata} else {} end)
+        ' "$raw_file" 2>/dev/null || printf '{}')
+    fi
     jq -nc \
         --arg name "$is_config_name" \
         --arg protocol "$is_protocol" \
@@ -1761,7 +1793,8 @@ json_node_obj() {
         --arg host "$host" \
         --arg path "$path" \
         --arg share_url "$is_url" \
-        '{name:$name,protocol:$protocol,network:$network,address:$address,port:$port,uuid:$uuid,password:$password,method:$method,sni:$sni,public_key:$public_key,host:$host,path:$path,share_url:$share_url}
+        --argjson enrich "$enrich" \
+        '({name:$name,protocol:$protocol,network:$network,address:$address,port:$port,uuid:$uuid,password:$password,method:$method,sni:$sni,public_key:$public_key,host:$host,path:$path,share_url:$share_url} + $enrich)
          | with_entries(select(.value != "" and .value != null))'
 }
 
@@ -1823,8 +1856,9 @@ line_json_obj() {
                 public_key:($node.public_key // ""),
                 host:($node.host // ""),
                 path:($node.path // ""),
-                node:$node,
-                lattice:($in._lattice // null)
+                line_id:($in._lattice.line_id // ""),
+                node_uuid:($in._lattice.node_uuid // ""),
+                node_id:($in._lattice.node_id // "")
             } | compact_obj)
         } | compact_obj' "$raw_file"
 }
