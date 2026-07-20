@@ -2099,13 +2099,13 @@ json_line_user_obj() {
             with_entries(select(.value != "" and .value != null and .value != [] and .value != {}));
         ($cfg[0].inbounds[0].type // "") as $type
         | if ($type == "vless" or $type == "vmess") then
-            {uuid:($p.uuid // ""), flow:($p.flow // "")} | compact_obj
+            {name:($p.name // ""), uuid:($p.uuid // ""), flow:($p.flow // "")} | compact_obj
           elif ($type == "tuic") then
-            {uuid:($p.uuid // ""), password:($p.password // "")} | compact_obj
+            {name:($p.name // ""), uuid:($p.uuid // ""), password:($p.password // "")} | compact_obj
           elif ($type == "trojan" or $type == "hysteria2" or $type == "anytls") then
-            {password:($p.password // "")} | compact_obj
+            {name:($p.name // ""), password:($p.password // "")} | compact_obj
           elif ($type == "socks") then
-            {username:($p.username // $p.email // $p.user_id // ""), password:($p.password // "")} | compact_obj
+            {name:($p.name // ""), username:($p.username // $p.email // $p.user_id // ""), password:($p.password // "")} | compact_obj
           else
             null
           end
@@ -2125,7 +2125,8 @@ json_line_user_valid() {
 
 json_line_user_matches_filter='
     def same_nonempty($a; $b): (($a // "") != "" and ($a // "") == ($b // ""));
-    (same_nonempty(.uuid; $user.uuid)
+    (same_nonempty(.name; $user.name)
+     or same_nonempty(.uuid; $user.uuid)
      or same_nonempty(.username; $user.username)
      or same_nonempty(.password; $user.password))
 '
@@ -2193,6 +2194,59 @@ cmd_json_user() {
     manage restart "$is_core" >/dev/null 2>&1 || true
     jq -nc --arg action "$op" --arg line "$config_file" --argjson before "$count_before" --argjson after "$count_after" \
         '{ok:true,action:$action,line:$line,user_count_before:$before,user_count_after:$after}'
+    exit 0
+}
+
+# meta --json -> regenerate the Lattice sidecar in design-15 v2 shape from on-box
+# state, print it, and exit. Identity continuity: an existing v2 inbounds[].line_uuid
+# or a v1 lines{}.line_id is preserved per conf file; only lines with no identity
+# anywhere get a fresh uuid. The v1 keys (.node/.lines) are kept alongside the v2
+# shape so pre-v2 readers (create/del/inspect) keep working unchanged. The server
+# remains the authoritative writer; this is the on-box fallback/repair path.
+cmd_json_meta() {
+    is_json_out=1
+    [[ -d $is_conf_dir ]] || json_err "not_found" "conf dir not found: $is_conf_dir" 2
+    local old='{}' now tmp doc node_uuid node_id
+    [[ -s $is_lattice_meta ]] && old=$(jq -c . "$is_lattice_meta" 2>/dev/null)
+    [[ $old ]] || old='{}'
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    node_uuid=${LATTICE_IDENTITY_UUID:-$(jq -r '.node_uuid // .node.node_uuid // empty' <<<"$old" 2>/dev/null)}
+    node_id=${LATTICE_NODE_ID:-$(jq -r '.node_id // .node.node_id // empty' <<<"$old" 2>/dev/null)}
+    [[ $node_id ]] || json_err "missing_node_id" "node id unknown; set LATTICE_NODE_ID (or keep the existing sidecar)" 2
+
+    local f tag uuid chain inbounds='[]'
+    for f in "$is_conf_dir"/*.json; do
+        [[ -f $f ]] || continue
+        tag=$(basename "$f")
+        uuid=$(jq -r --arg t "$tag" '(.inbounds // []) | map(select(.tag == $t)) | .[0].line_uuid // empty' <<<"$old" 2>/dev/null)
+        [[ ! $uuid ]] && uuid=$(jq -r --arg t "$tag" '.lines[$t].line_id // empty' <<<"$old" 2>/dev/null)
+        [[ ! $uuid ]] && { get_uuid; uuid=$tmp_uuid; }
+        chain=$(jq -c --arg t "$tag" '(.inbounds // []) | map(select(.tag == $t)) | .[0].chain // empty' <<<"$old" 2>/dev/null)
+        if [[ $chain ]]; then
+            inbounds=$(jq -c --arg t "$tag" --arg u "$uuid" --argjson c "$chain" '. + [{tag:$t, line_uuid:$u, chain:$c}]' <<<"$inbounds")
+        else
+            inbounds=$(jq -c --arg t "$tag" --arg u "$uuid" '. + [{tag:$t, line_uuid:$u}]' <<<"$inbounds")
+        fi
+    done
+
+    doc=$(jq -n \
+        --arg now "$now" --arg node_uuid "$node_uuid" --arg node_id "$node_id" --argjson inbounds "$inbounds" '
+        ($inbounds | map({key:.tag, value:{line_id:.line_uuid}}) | from_entries) as $v1lines
+        | {
+            schema:"lattice.singbox-metadata.v2",
+            node_id:$node_id, updated_at:$now, writer:"sb",
+            inbounds:$inbounds,
+            node:{node_uuid:$node_uuid, node_id:$node_id} | with_entries(select(.value != "")),
+            lines:$v1lines,
+            reserved:{in_config_key:"_lattice",
+              fields:{line_uuid:"string",node_uuid:"string",line_hash_id:"string"}}
+          }
+        | if $node_uuid != "" then .node_uuid=$node_uuid else . end')
+    tmp=$(mktemp "${TMPDIR:-/tmp}/lattice-meta-v2.XXXXXX") || json_err "tmp_failed" "cannot create temp file" 2
+    mkdir -p "$(dirname "$is_lattice_meta")" 2>/dev/null
+    jq . <<<"$doc" >"$tmp" || { rm -f "$tmp"; json_err "jq_failed" "failed to render v2 metadata" 2; }
+    mv "$tmp" "$is_lattice_meta"
+    cat "$is_lattice_meta"
     exit 0
 }
 
@@ -2656,6 +2710,9 @@ main() {
         ;;
     user)
         cmd_json_user "$2" "$3" "$4"
+        ;;
+    meta)
+        cmd_json_meta
         ;;
     a | add | gen | no-auto-tls)
         [[ $1 == 'gen' ]] && is_gen=1

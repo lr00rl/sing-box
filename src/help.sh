@@ -67,6 +67,8 @@ show_help() {
             "自动化:"
             "   list, ls [filter]                               以 JSON 列出配置"
             "   inspect [name]                                  以 JSON 输出 Line 形态配置"
+            "   user add|del <line> <json>                      增删某条线路的用户 (json 可含 name/uuid/password)"
+            "   meta                                            重建并输出 design-15 v2 sidecar 元数据"
             "   sub                                             以 JSON 输出全部节点订阅内容"
             "   provision                                       以 JSON 检查安装与服务状态"
             "   backup [--json]                                 备份配置数据 (含 lattice-metadata.json)\n"
