@@ -2250,6 +2250,60 @@ cmd_json_meta() {
     exit 0
 }
 
+# Generic atomic jq edit of a sing-box config file: backup -> jq with caller
+# args -> mv -> `sing-box check` with automatic rollback on rejection. Mirrors
+# json_write_config_atomically but takes arbitrary jq --arg/--argjson pairs.
+json_edit_config_atomically() {
+    local raw_file="$1" filter="$2"
+    shift 2
+    local tmp backup errf
+    tmp=$(mktemp "${TMPDIR:-/tmp}/lattice-sb-edit.XXXXXX") || json_err "tmp_failed" "cannot create temp file" 2
+    backup="$raw_file.backup-$(date -u +%Y%m%d-%H%M%S)"
+    errf=$(mktemp "${TMPDIR:-/tmp}/lattice-sb-check.XXXXXX") || { rm -f "$tmp"; json_err "tmp_failed" "cannot create temp file" 2; }
+    cp -p "$raw_file" "$backup" || { rm -f "$tmp" "$errf"; json_err "backup_failed" "cannot backup $raw_file" 2; }
+    if ! jq "$@" "$filter" "$raw_file" >"$tmp"; then
+        rm -f "$tmp" "$errf"
+        json_err "jq_failed" "failed to update $raw_file" 2
+    fi
+    mv "$tmp" "$raw_file" || { rm -f "$tmp" "$errf"; json_err "write_failed" "failed to replace $raw_file" 2; }
+    if ! "$is_core_bin" check -c "$raw_file" >"$errf" 2>&1; then
+        mv "$backup" "$raw_file" 2>/dev/null || true
+        local check_error
+        check_error=$(tail -n 20 "$errf" 2>/dev/null)
+        rm -f "$errf"
+        jq -nc --arg error "config_invalid" --arg message "sing-box rejected updated config; rolled back" --arg detail "$check_error" \
+            '{ok:false,error:$error,message:$message,detail:$detail}'
+        exit 1
+    fi
+    rm -f "$errf"
+}
+
+# stats on|off [listen] -> toggle the experimental V2Ray stats API in config.json
+# (design-15 §8 / ADR-004). Loopback listens only: a stats API must never bind a
+# routable address.
+cmd_json_stats() {
+    is_json_out=1
+    local op="$1" listen="${2:-127.0.0.1:8080}"
+    [[ $op == "on" || $op == "off" ]] || json_err "invalid_action" "stats action must be on or off" 2
+    [[ -f $is_config_json ]] || json_err "not_found" "config.json not found: $is_config_json" 2
+    if [[ $op == "on" ]]; then
+        case "$listen" in
+            127.* | localhost:* | \[::1\]:*) ;;
+            *) json_err "invalid_listen" "stats listen must be loopback (e.g. 127.0.0.1:8080)" 2 ;;
+        esac
+        local port="${listen##*:}"
+        [[ $port =~ ^[0-9]+$ && $port -ge 1 && $port -le 65535 ]] || json_err "invalid_listen" "stats listen port is invalid" 2
+        json_edit_config_atomically "$is_config_json" \
+            '.experimental.v2ray_api = {listen:$l, stats:{enabled:true}}' --arg l "$listen"
+    else
+        json_edit_config_atomically "$is_config_json" \
+            'del(.experimental.v2ray_api) | if (.experimental // {} | length) == 0 then del(.experimental) else . end'
+    fi
+    manage restart "$is_core" >/dev/null 2>&1 || true
+    jq -nc --arg action "$op" --arg listen "$listen" '{ok:true,stats:$action,listen:(if $action=="on" then $listen else "" end)}'
+    exit 0
+}
+
 conncheck_now_ms() {
     local now
     now=$(date +%s%3N 2>/dev/null)
@@ -2713,6 +2767,9 @@ main() {
         ;;
     meta)
         cmd_json_meta
+        ;;
+    stats)
+        cmd_json_stats "$2" "$3"
         ;;
     a | add | gen | no-auto-tls)
         [[ $1 == 'gen' ]] && is_gen=1

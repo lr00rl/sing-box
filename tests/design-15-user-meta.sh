@@ -24,6 +24,11 @@ eval "$(extract_fn json_line_user_obj)"
 eval "$(extract_fn json_line_user_valid)"
 eval "$(awk "/^json_line_user_matches_filter='/,/^'/" "$CORE")"
 eval "$(extract_fn cmd_json_meta)"
+eval "$(extract_fn json_edit_config_atomically)"
+eval "$(extract_fn cmd_json_stats)"
+is_config_json="$TMP/config.json"; is_core_bin=$(command -v true); is_core=sing-box
+manage() { :; }
+echo '{"log":{},"dns":{}}' >"$is_config_json"
 
 # --- fixtures ----------------------------------------------------------------
 cat >"$is_conf_dir/vless-443.json" <<'EOF'
@@ -100,6 +105,22 @@ LATTICE_NODE_ID="test-node"
 out5=$(cmd_json_meta 2>/dev/null)
 chk "chain preserved" "$(jq -c '.inbounds[] | select(.tag=="vless-443.json") | .chain' <<<"$out5")" \
   '{"downstream_line_uuid":"44444444-4444-4444-8444-444444444444","downstream_node":"qqpw"}'
+
+# --- 8. stats on/off toggles the experimental API (loopback only) ----------------
+out=$(cmd_json_stats on 2>/dev/null)
+chk "stats on ok" "$(jq -r .stats <<<"$out")" "on"
+chk "stats listen default" "$(jq -r .experimental.v2ray_api.listen "$is_config_json")" "127.0.0.1:8080"
+chk "stats enabled" "$(jq -r .experimental.v2ray_api.stats.enabled "$is_config_json")" "true"
+out=$(cmd_json_stats on 127.0.0.1:9090 2>/dev/null)
+chk "stats custom listen" "$(jq -r .experimental.v2ray_api.listen "$is_config_json")" "127.0.0.1:9090"
+out=$(cmd_json_stats on 0.0.0.0:8080 2>&1); rc=$?
+[ $rc -ne 0 ] && ok "routable listen rejected" || bad "routable listen rejected: $out"
+out=$(cmd_json_stats on 127.0.0.1:notaport 2>&1); rc=$?
+[ $rc -ne 0 ] && ok "bad port rejected" || bad "bad port rejected: $out"
+out=$(cmd_json_stats off 2>/dev/null)
+chk "stats off ok" "$(jq -r .stats <<<"$out")" "off"
+chk "experimental block removed" "$(jq 'has("experimental")' "$is_config_json")" "false"
+chk "other keys intact" "$(jq 'has("log") and has("dns")' "$is_config_json")" "true"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
