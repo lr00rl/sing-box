@@ -320,7 +320,9 @@ sidecar 结构：
 ## 发布与维护
 
 - 脚本版本写在 `sing-box.sh` 的 `is_sh_ver`。
-- GitHub Actions 会在 `main` 分支 push 后读取 `is_sh_ver`，生成/更新同名 Release。
+- GitHub Actions 会在 `main` 分支 push 后读取 `is_sh_ver`，但只接受明确的
+  `alpha` / `beta` / `rc` 版本，并把 Release 标记为 prerelease、非 Latest。
+- 稳定版本必须经过单独的人工发布决策；不能由普通 `main` 推送自动生成。
 - Release 资产 `code.tar.gz` 是远程安装和 `sb update sh` 使用的脚本包。
 - 如果修改脚本逻辑并希望已安装机器检测到更新，需要同步提升 `is_sh_ver`。
 - 安装脚本里的 `is_sh_repo` 指向 `lr00rl/sing-box`。
