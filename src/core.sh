@@ -488,6 +488,104 @@ ask() {
     unset is_opt_msg is_opt_input_msg is_tmp_list is_ask_result is_default_arg is_emtpy_exit
 }
 
+# ------------- Lattice sidecar metadata (design-09 §E.2) -------------
+# Upstream sing-box loads /etc/sing-box/config.json (-c) plus every
+# /etc/sing-box/conf/*.json (-C) with DisallowUnknownFields at BOTH the top and
+# inbound level, so it FATALs on any unknown key (e.g. `_lattice`). Node and line
+# identity therefore live in a sidecar the service never parses: $is_lattice_meta
+# (/etc/sing-box/lattice-metadata.json), OUTSIDE conf/. Shape:
+#   {version, node:{node_uuid,node_id,purity_percent,quality},
+#    lines:{"<conf>.json":{line_id}}}
+
+# Atomically apply a jq program to the sidecar (create-if-absent). Mirrors the
+# repo's backup->jq->mv pattern: jq writes a temp file and we only mv it into
+# place on success, so the live sidecar is never left half-written.
+lattice_meta_apply() {
+    local filter=$1
+    shift
+    local tmp base='{"version":1,"node":{},"lines":{}}'
+    [[ -s $is_lattice_meta ]] && base=$(jq -c . "$is_lattice_meta" 2>/dev/null)
+    [[ $base ]] || base='{"version":1,"node":{},"lines":{}}'
+    mkdir -p "$(dirname "$is_lattice_meta")" 2>/dev/null
+    tmp=$(mktemp "${TMPDIR:-/tmp}/lattice-meta.XXXXXX") || return 1
+    if jq "$@" "$filter" <<<"$base" >"$tmp" 2>/dev/null; then
+        mv "$tmp" "$is_lattice_meta"
+    else
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
+# Record node-level identity from the environment. LATTICE_NODE_PURITY must be an
+# integer 0-100 (else warn + skip, never fail create); LATTICE_NODE_QUALITY is a
+# short free-form string. Fields absent from the env are preserved, not wiped.
+lattice_meta_write_node() {
+    local purity=$LATTICE_NODE_PURITY quality=$LATTICE_NODE_QUALITY purity_arg=
+    if [[ $purity ]]; then
+        if [[ $purity =~ ^[0-9]+$ ]] && [[ $purity -ge 0 && $purity -le 100 ]]; then
+            purity_arg=$purity
+        else
+            warn "LATTICE_NODE_PURITY ($purity) 无效, 已忽略 (应为 0-100 的整数)."
+        fi
+    fi
+    lattice_meta_apply '
+        .node.node_uuid=$node_uuid
+        | if $node_id != "" then .node.node_id=$node_id else . end
+        | if $purity != "" then .node.purity_percent=($purity|tonumber) else . end
+        | if $quality != "" then .node.quality=$quality else . end
+    ' --arg node_uuid "$LATTICE_IDENTITY_UUID" \
+        --arg node_id "$LATTICE_NODE_ID" \
+        --arg purity "$purity_arg" \
+        --arg quality "$quality"
+}
+
+# Look up a line's line_id from the sidecar (keyed by conf filename).
+lattice_meta_line_id() {
+    [[ -f $is_lattice_meta ]] || return 0
+    jq -r --arg n "$1" '.lines[$n].line_id // empty' "$is_lattice_meta" 2>/dev/null
+}
+
+# Assign/preserve a line's line_id under its conf filename key.
+lattice_meta_write_line() {
+    lattice_meta_apply '.lines[$n].line_id=$line_id' --arg n "$1" --arg line_id "$2"
+}
+
+# Drop a line's sidecar entry (deletion, or the old key after a rename).
+lattice_meta_del_line() {
+    [[ -f $is_lattice_meta ]] || return 0
+    lattice_meta_apply 'del(.lines[$n])' --arg n "$1"
+}
+
+# Flat {line_id,node_uuid,node_id} object for one conf filename, as the machine
+# interface emits it. Sidecar wins; a legacy in-config _lattice block (pre-sidecar
+# nodes) fills any gaps so migrated readers keep emitting the same shape.
+lattice_meta_obj_for() {
+    local name=$1 raw_file=$2 sidecar='{}' legacy='{}'
+    [[ -f $is_lattice_meta ]] && sidecar=$(jq -c --arg n "$name" '
+        (.lines[$n] // {}) as $line
+        | (.node // {}) as $node
+        | {line_id:($line.line_id // ""), node_uuid:($node.node_uuid // ""), node_id:($node.node_id // "")}
+        | with_entries(select(.value != ""))' "$is_lattice_meta" 2>/dev/null)
+    [[ $sidecar ]] || sidecar='{}'
+    [[ $raw_file && -f $raw_file ]] && legacy=$(jq -c '(.inbounds[0]._lattice // {})
+        | {line_id:(.line_id // ""), node_uuid:(.node_uuid // ""), node_id:(.node_id // "")}
+        | with_entries(select(.value != ""))' "$raw_file" 2>/dev/null)
+    [[ $legacy ]] || legacy='{}'
+    jq -cn --argjson l "$legacy" --argjson s "$sidecar" '$l + $s'
+}
+
+# Node-level identity object for `info --json` (sidecar .node, legacy _lattice fallback).
+lattice_meta_node_obj() {
+    local raw_file=$1 node='{}' legacy='{}'
+    [[ -f $is_lattice_meta ]] && node=$(jq -c '.node // {}' "$is_lattice_meta" 2>/dev/null)
+    [[ $node ]] || node='{}'
+    [[ $raw_file && -f $raw_file ]] && legacy=$(jq -c '(.inbounds[0]._lattice // {})
+        | {node_uuid:(.node_uuid // ""), node_id:(.node_id // "")}
+        | with_entries(select(.value != ""))' "$raw_file" 2>/dev/null)
+    [[ $legacy ]] || legacy='{}'
+    jq -cn --argjson l "$legacy" --argjson n "$node" '($l + $n) | with_entries(select(.value != "" and .value != null))'
+}
+
 # create file
 create() {
     case $1 in
@@ -510,18 +608,22 @@ create() {
         [[ $is_change || ! $json_str ]] && get protocol $2
         [[ $net == "reality" ]] && is_add_public_key=",outbounds:[{type:\"direct\"},{tag:\"public_key_$is_public_key\",type:\"direct\"}]"
         is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port,$json_str}]$is_add_public_key}" <<<{})
-        if [[ $LATTICE_IDENTITY_UUID ]]; then
+        # design-09 §E.2: node/line identity goes to the sidecar, NOT the config,
+        # so the strict-parsing service can still load conf/*.json. Skip on gen/
+        # test flows since they never persist a config. Preserve line_id continuity:
+        # explicit env -> new filename's sidecar entry -> old filename's entry (a
+        # rename) -> legacy in-config _lattice (pre-sidecar migration) -> fresh uuid.
+        if [[ $LATTICE_IDENTITY_UUID && ! $is_gen && ! $is_test_json ]]; then
             is_lattice_line_id=$LATTICE_LINE_ID
-            [[ ! $is_lattice_line_id && $is_config_file && -f $is_config_file ]] && is_lattice_line_id=$(jq -r '.inbounds[0]._lattice.line_id // empty' "$is_config_file" 2>/dev/null)
+            [[ ! $is_lattice_line_id ]] && is_lattice_line_id=$(lattice_meta_line_id "$is_config_name")
+            [[ ! $is_lattice_line_id && $is_config_file && $is_config_file != "$is_config_name" ]] && is_lattice_line_id=$(lattice_meta_line_id "$is_config_file")
+            [[ ! $is_lattice_line_id && $is_config_file && -f $is_conf_dir/$is_config_file ]] && is_lattice_line_id=$(jq -r '.inbounds[0]._lattice.line_id // empty' "$is_conf_dir/$is_config_file" 2>/dev/null)
             [[ ! $is_lattice_line_id && -f $is_json_file ]] && is_lattice_line_id=$(jq -r '.inbounds[0]._lattice.line_id // empty' "$is_json_file" 2>/dev/null)
             [[ ! $is_lattice_line_id ]] && get_uuid && is_lattice_line_id=$tmp_uuid
-            is_new_json=$(jq \
-                --arg node_uuid "$LATTICE_IDENTITY_UUID" \
-                --arg line_id "$is_lattice_line_id" \
-                --arg node_id "$LATTICE_NODE_ID" \
-                '.inbounds[0]._lattice.node_uuid=$node_uuid
-                 | .inbounds[0]._lattice.line_id=$line_id
-                 | if $node_id != "" then .inbounds[0]._lattice.node_id=$node_id else . end' <<<$is_new_json)
+            lattice_meta_write_node
+            lattice_meta_write_line "$is_config_name" "$is_lattice_line_id"
+            # rename: identity now lives under the new key; drop the stale old key.
+            [[ $is_config_file && $is_config_file != "$is_config_name" ]] && lattice_meta_del_line "$is_config_file"
         fi
         [[ $is_test_json ]] && return # tmp test
         # only show json, dont save to file.
@@ -866,6 +968,9 @@ del() {
         fi
         rm -rf $is_conf_dir/"$is_config_file"
         rm -f "$(config_addr_file "$is_config_file")"
+        # drop the Lattice sidecar entry only on a standalone delete; create()'s
+        # internal rewrite (is_new_json set) handles rename cleanup itself.
+        [[ ! $is_new_json ]] && lattice_meta_del_line "$is_config_file"
         [[ ! $is_new_json ]] && manage restart &
         [[ ! $is_no_del_msg ]] && _green "\n已删除: $is_config_file\n"
 
@@ -1762,12 +1867,16 @@ json_node_obj() {
     [[ ! $pass && $ss_password ]] && pass=$ss_password
     local raw_file=$is_conf_dir/$is_config_name
     local enrich='{}'
+    # design-09 §E.2: identity comes from the sidecar (legacy _lattice as fallback),
+    # not from the config; emitted shape stays identical for machine consumers.
+    local lattice_obj
+    lattice_obj=$(lattice_meta_obj_for "$is_config_name" "$raw_file")
     if [[ -f $raw_file ]]; then
-        enrich=$(jq -c --arg tag "$is_config_name" '
+        enrich=$(jq -c --arg tag "$is_config_name" --argjson lat "$lattice_obj" '
             def compact_obj:
                 with_entries(select(.value != "" and .value != null and .value != [] and .value != {}));
             .inbounds[0] as $in
-            | ($in._lattice // {}) as $lattice
+            | ($lat // {}) as $lattice
             | (($lattice // {}) | with_entries(select((.value | type) == "string" and .value != ""))) as $metadata
             | ({
                 line_id:($lattice.line_id // ""),
@@ -1810,11 +1919,15 @@ line_json_obj() {
     [[ ! $domain ]] && domain=$custom_addr
     [[ ! $domain ]] && domain=$is_servername
 
+    local lattice_obj
+    lattice_obj=$(lattice_meta_obj_for "$is_config_name" "$raw_file")
+
     jq -c \
         --arg core "$is_core" \
         --arg tag "$is_config_name" \
         --arg domain "$domain" \
         --arg custom_addr "$custom_addr" \
+        --argjson lat "$lattice_obj" \
         --argjson node "$node_json" '
         def compact_obj:
             with_entries(select(.value != "" and .value != null and .value != []));
@@ -1856,9 +1969,9 @@ line_json_obj() {
                 public_key:($node.public_key // ""),
                 host:($node.host // ""),
                 path:($node.path // ""),
-                line_id:($in._lattice.line_id // ""),
-                node_uuid:($in._lattice.node_uuid // ""),
-                node_id:($in._lattice.node_id // "")
+                line_id:($lat.line_id // ""),
+                node_uuid:($lat.node_uuid // ""),
+                node_id:($lat.node_id // "")
             } | compact_obj)
         } | compact_obj' "$raw_file"
 }
@@ -1947,7 +2060,16 @@ cmd_json_info() {
     is_dont_show_info=1
     is_dont_test_host=1
     info "${cleaned[0]}" 2>/dev/null
-    printf '{"ok":true,"node":%s}\n' "$(json_node_obj)"
+    # design-09 §E.2: also surface the Lattice node object (node_uuid/node_id plus
+    # purity_percent/quality when recorded) from the sidecar, keeping `node` as-is.
+    local node_obj lattice_node
+    node_obj=$(json_node_obj)
+    lattice_node=$(lattice_meta_node_obj "$is_conf_dir/$is_config_name")
+    if [[ $lattice_node && $lattice_node != "{}" ]]; then
+        printf '{"ok":true,"node":%s,"lattice_node":%s}\n' "$node_obj" "$lattice_node"
+    else
+        printf '{"ok":true,"node":%s}\n' "$node_obj"
+    fi
     exit 0
 }
 
@@ -2317,7 +2439,8 @@ cmd_json_provision() {
 }
 
 # backup [--json] -> archive the sing-box config DATA (config.json + conf/, incl.
-# per-node .json and .addr sidecars) to /opt/lattice/.archive_backup/ as a
+# per-node .json and .addr sidecars, plus the Lattice lattice-metadata.json
+# identity sidecar) to /opt/lattice/.archive_backup/ as a
 # timestamped tarball. Works on any install — including nodes deployed by hand or
 # by the interactive script flow — because it archives whatever is on disk.
 cmd_backup() {
@@ -2325,6 +2448,8 @@ cmd_backup() {
     local items=()
     [[ -f $is_config_json ]] && items+=(config.json)
     [[ -d $is_conf_dir ]] && items+=(conf)
+    # Lattice node/line identity sidecar (design-09 §E.2), if present.
+    [[ -f $is_lattice_meta ]] && items+=(lattice-metadata.json)
     if [[ ${#items[@]} -eq 0 ]]; then
         [[ $is_json_out ]] && json_err "nothing_to_backup" "no sing-box config data under $is_core_dir" 2
         err "没有可备份的 $is_core_name 数据 ($is_core_dir)"
