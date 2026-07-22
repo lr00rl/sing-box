@@ -500,15 +500,37 @@ ask() {
 # Atomically apply a jq program to the sidecar (create-if-absent). Mirrors the
 # repo's backup->jq->mv pattern: jq writes a temp file and we only mv it into
 # place on success, so the live sidecar is never left half-written.
+lattice_meta_validate() {
+    jq -e '
+        def uuidv4: type == "string" and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$");
+        if has("schema") then
+            .schema == "lattice.singbox-metadata.v2"
+            and ((.node_uuid // .node.node_uuid // "") as $n | ($n == "" or ($n | uuidv4)))
+            and (.inbounds | type == "array")
+            and (all(.inbounds[];
+                (.tag | type == "string" and length > 0)
+                and (.line_uuid | uuidv4)
+                and ((.chain.downstream_line_uuid? // null) as $d |
+                    $d == null or (($d | uuidv4) and $d != .line_uuid))))
+            and (([.inbounds[].tag] | unique | length) == (.inbounds | length))
+            and (([.inbounds[].line_uuid | ascii_downcase] | unique | length) == (.inbounds | length))
+        else
+            ((.version // 1) == 1) and ((.node // {}) | type == "object") and ((.lines // {}) | type == "object")
+        end
+    ' >/dev/null
+}
+
 lattice_meta_apply() {
     local filter=$1
     shift
     local tmp base='{"version":1,"node":{},"lines":{}}'
-    [[ -s $is_lattice_meta ]] && base=$(jq -c . "$is_lattice_meta" 2>/dev/null)
-    [[ $base ]] || base='{"version":1,"node":{},"lines":{}}'
+    if [[ -s $is_lattice_meta ]]; then
+        base=$(jq -c . "$is_lattice_meta" 2>/dev/null) || return 1
+        lattice_meta_validate <<<"$base" || return 1
+    fi
     mkdir -p "$(dirname "$is_lattice_meta")" 2>/dev/null
     tmp=$(mktemp "${TMPDIR:-/tmp}/lattice-meta.XXXXXX") || return 1
-    if jq "$@" "$filter" <<<"$base" >"$tmp" 2>/dev/null; then
+    if jq "$@" "$filter" <<<"$base" >"$tmp" 2>/dev/null && lattice_meta_validate <"$tmp"; then
         mv "$tmp" "$is_lattice_meta"
     else
         rm -f "$tmp"
@@ -542,6 +564,7 @@ lattice_meta_write_node() {
 # Look up a line's line_id from the sidecar (keyed by conf filename).
 lattice_meta_line_id() {
     [[ -f $is_lattice_meta ]] || return 0
+    lattice_meta_validate <"$is_lattice_meta" || return 0
     jq -r --arg n "$1" '.lines[$n].line_id // empty' "$is_lattice_meta" 2>/dev/null
 }
 
@@ -561,11 +584,17 @@ lattice_meta_del_line() {
 # nodes) fills any gaps so migrated readers keep emitting the same shape.
 lattice_meta_obj_for() {
     local name=$1 raw_file=$2 sidecar='{}' legacy='{}'
-    [[ -f $is_lattice_meta ]] && sidecar=$(jq -c --arg n "$name" '
-        (.lines[$n] // {}) as $line
-        | (.node // {}) as $node
-        | {line_id:($line.line_id // ""), node_uuid:($node.node_uuid // ""), node_id:($node.node_id // "")}
-        | with_entries(select(.value != ""))' "$is_lattice_meta" 2>/dev/null)
+    if [[ -f $is_lattice_meta ]]; then
+        if ! lattice_meta_validate <"$is_lattice_meta"; then
+            printf '{}\n'
+            return 0
+        fi
+        sidecar=$(jq -c --arg n "$name" '
+            (.lines[$n] // {}) as $line
+            | (.node // {}) as $node
+            | {line_id:($line.line_id // ""), node_uuid:($node.node_uuid // ""), node_id:($node.node_id // "")}
+            | with_entries(select(.value != ""))' "$is_lattice_meta" 2>/dev/null)
+    fi
     [[ $sidecar ]] || sidecar='{}'
     [[ $raw_file && -f $raw_file ]] && legacy=$(jq -c '(.inbounds[0]._lattice // {})
         | {line_id:(.line_id // ""), node_uuid:(.node_uuid // ""), node_id:(.node_id // "")}
@@ -577,7 +606,13 @@ lattice_meta_obj_for() {
 # Node-level identity object for `info --json` (sidecar .node, legacy _lattice fallback).
 lattice_meta_node_obj() {
     local raw_file=$1 node='{}' legacy='{}'
-    [[ -f $is_lattice_meta ]] && node=$(jq -c '.node // {}' "$is_lattice_meta" 2>/dev/null)
+    if [[ -f $is_lattice_meta ]]; then
+        if ! lattice_meta_validate <"$is_lattice_meta"; then
+            printf '{}\n'
+            return 0
+        fi
+        node=$(jq -c '.node // {}' "$is_lattice_meta" 2>/dev/null)
+    fi
     [[ $node ]] || node='{}'
     [[ $raw_file && -f $raw_file ]] && legacy=$(jq -c '(.inbounds[0]._lattice // {})
         | {node_uuid:(.node_uuid // ""), node_id:(.node_id // "")}
@@ -2006,21 +2041,12 @@ cmd_json_list() {
 cmd_json_inspect() {
     is_json_out=1
     local name="$1"
-    local files=() matches=() cleaned=() lines=() f out
+    local files=() lines=() f out resolve_out resolve_rc
     if [[ $name ]]; then
-        if [[ -f $is_conf_dir/$name ]]; then
-            matches=("$name")
-        elif [[ -f $is_conf_dir/$name.json ]]; then
-            matches=("$name.json")
-        elif [[ -d $is_conf_dir ]]; then
-            readarray -t matches <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -F -i -- "$name" | sed '/dynamic-port-.*-link/d')"
-        fi
-        for f in "${matches[@]}"; do
-            [[ $f && $f =~ \.json$ ]] && cleaned+=("$f")
-        done
-        [[ ${#cleaned[@]} -eq 0 ]] && json_err "not_found" "no line matches: $name" 2
-        [[ ${#cleaned[@]} -gt 1 ]] && json_err "ambiguous" "multiple lines match: $name" 2
-        is_config_file="${cleaned[0]}"
+        resolve_out=$(json_resolve_config_file "$name" 2>&1)
+        resolve_rc=$?
+        [[ $resolve_rc -eq 0 ]] || { printf '%s\n' "$resolve_out"; exit "$resolve_rc"; }
+        is_config_file="$resolve_out"
         is_dont_show_info=1
         is_dont_test_host=1
         info "$is_config_file" >/dev/null 2>&1
@@ -2052,14 +2078,13 @@ cmd_json_info() {
     is_json_out=1
     local name="$1"
     [[ ! $name ]] && json_err "missing_name" "info --json requires a node name" 2
-    local matches=() cleaned=() m
-    [[ -d $is_conf_dir ]] && readarray -t matches <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -E -i "$name" | sed '/dynamic-port-.*-link/d')"
-    for m in "${matches[@]}"; do [[ $m ]] && cleaned+=("$m"); done
-    [[ ${#cleaned[@]} -eq 0 ]] && json_err "not_found" "no node matches: $name" 2
-    [[ ${#cleaned[@]} -gt 1 ]] && json_err "ambiguous" "multiple nodes match: $name" 2
+    local resolved resolve_rc
+    resolved=$(json_resolve_config_file "$name" 2>&1)
+    resolve_rc=$?
+    [[ $resolve_rc -eq 0 ]] || { printf '%s\n' "$resolved"; exit "$resolve_rc"; }
     is_dont_show_info=1
     is_dont_test_host=1
-    info "${cleaned[0]}" 2>/dev/null
+    info "$resolved" 2>/dev/null
     # design-09 §E.2: also surface the Lattice node object (node_uuid/node_id plus
     # purity_percent/quality when recorded) from the sidecar, keeping `node` as-is.
     local node_obj lattice_node
@@ -2075,17 +2100,22 @@ cmd_json_info() {
 
 json_resolve_config_file() {
     local name="$1"
-    local matches=() cleaned=() f
+    local matches=() cleaned=() f exact=
     [[ ! $name ]] && json_err "missing_name" "line name is required" 2
-    if [[ -f $is_conf_dir/$name ]]; then
-        matches=("$name")
-    elif [[ -f $is_conf_dir/$name.json ]]; then
-        matches=("$name.json")
+    [[ $name == "${name##*/}" && $name != "." && $name != ".." && $name != *$'\n'* && $name != *$'\r'* ]] \
+        || json_err "invalid_name" "line name must be a basename" 2
+    if [[ $name == *.json && -f "$is_conf_dir/$name" ]]; then
+        exact="$name"
+    elif [[ $name != *.json && -f "$is_conf_dir/$name.json" ]]; then
+        exact="$name.json"
+    fi
+    if [[ $exact ]]; then
+        matches=("$exact")
     elif [[ -d $is_conf_dir ]]; then
         readarray -t matches <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -F -i -- "$name" | sed '/dynamic-port-.*-link/d')"
     fi
     for f in "${matches[@]}"; do
-        [[ $f && $f =~ \.json$ ]] && cleaned+=("$f")
+        [[ $f == "${f##*/}" && $f == *.json ]] && cleaned+=("$f")
     done
     [[ ${#cleaned[@]} -eq 0 ]] && json_err "not_found" "no line matches: $name" 2
     [[ ${#cleaned[@]} -gt 1 ]] && json_err "ambiguous" "multiple lines match: $name" 2
@@ -2099,13 +2129,13 @@ json_line_user_obj() {
             with_entries(select(.value != "" and .value != null and .value != [] and .value != {}));
         ($cfg[0].inbounds[0].type // "") as $type
         | if ($type == "vless" or $type == "vmess") then
-            {uuid:($p.uuid // ""), flow:($p.flow // "")} | compact_obj
+            {name:($p.name // ""), uuid:($p.uuid // ""), flow:($p.flow // "")} | compact_obj
           elif ($type == "tuic") then
-            {uuid:($p.uuid // ""), password:($p.password // "")} | compact_obj
+            {name:($p.name // ""), uuid:($p.uuid // ""), password:($p.password // "")} | compact_obj
           elif ($type == "trojan" or $type == "hysteria2" or $type == "anytls") then
-            {password:($p.password // "")} | compact_obj
+            {name:($p.name // ""), password:($p.password // "")} | compact_obj
           elif ($type == "socks") then
-            {username:($p.username // $p.email // $p.user_id // ""), password:($p.password // "")} | compact_obj
+            {name:($p.name // ""), username:($p.username // $p.email // $p.user_id // ""), password:($p.password // "")} | compact_obj
           else
             null
           end
@@ -2125,7 +2155,8 @@ json_line_user_valid() {
 
 json_line_user_matches_filter='
     def same_nonempty($a; $b): (($a // "") != "" and ($a // "") == ($b // ""));
-    (same_nonempty(.uuid; $user.uuid)
+    (same_nonempty(.name; $user.name)
+     or same_nonempty(.uuid; $user.uuid)
      or same_nonempty(.username; $user.username)
      or same_nonempty(.password; $user.password))
 '
@@ -2190,9 +2221,122 @@ cmd_json_user() {
     json_write_config_atomically "$raw_file" "$filter" "$user_json"
     count_after=$(jq '(.inbounds[0].users // []) | length' "$raw_file" 2>/dev/null)
     [[ $count_after =~ ^[0-9]+$ ]] || count_after=0
-    manage restart "$is_core" >/dev/null 2>&1 || true
+    manage restart "$is_core" >/dev/null 2>&1 || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
     jq -nc --arg action "$op" --arg line "$config_file" --argjson before "$count_before" --argjson after "$count_after" \
         '{ok:true,action:$action,line:$line,user_count_before:$before,user_count_after:$after}'
+    exit 0
+}
+
+# meta --json -> regenerate the Lattice sidecar in design-15 v2 shape from on-box
+# state, print it, and exit. Identity continuity: an existing v2 inbounds[].line_uuid
+# or a v1 lines{}.line_id is preserved per conf file; only lines with no identity
+# anywhere get a fresh uuid. The v1 keys (.node/.lines) are kept alongside the v2
+# shape so pre-v2 readers (create/del/inspect) keep working unchanged. The server
+# remains the authoritative writer; this is the on-box fallback/repair path.
+cmd_json_meta() {
+    is_json_out=1
+    [[ -d $is_conf_dir ]] || json_err "not_found" "conf dir not found: $is_conf_dir" 2
+    local old='{}' now tmp doc node_uuid node_id
+    if [[ -s $is_lattice_meta ]]; then
+        old=$(jq -c . "$is_lattice_meta" 2>/dev/null) || json_err "metadata_invalid" "existing sidecar is corrupt; refusing to overwrite it" 2
+        lattice_meta_validate <<<"$old" || json_err "metadata_invalid" "existing sidecar schema or UUID data is invalid; refusing to overwrite it" 2
+    fi
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    node_uuid=${LATTICE_IDENTITY_UUID:-$(jq -r '.node_uuid // .node.node_uuid // empty' <<<"$old" 2>/dev/null)}
+    node_id=${LATTICE_NODE_ID:-$(jq -r '.node_id // .node.node_id // empty' <<<"$old" 2>/dev/null)}
+    [[ $node_id ]] || json_err "missing_node_id" "node id unknown; set LATTICE_NODE_ID (or keep the existing sidecar)" 2
+
+    local f tag uuid prior inbounds='[]'
+    for f in "$is_conf_dir"/*.json; do
+        [[ -f $f ]] || continue
+        tag=$(basename "$f")
+        uuid=$(jq -r --arg t "$tag" '(.inbounds // []) | map(select(.tag == $t)) | .[0].line_uuid // empty' <<<"$old" 2>/dev/null)
+        [[ ! $uuid ]] && uuid=$(jq -r --arg t "$tag" '.lines[$t].line_id // empty' <<<"$old" 2>/dev/null)
+        [[ ! $uuid ]] && { get_uuid; uuid=$tmp_uuid; }
+        prior=$(jq -c --arg t "$tag" '(.inbounds // []) | map(select(.tag == $t)) | .[0] // {}' <<<"$old" 2>/dev/null)
+        [[ $prior ]] || prior='{}'
+        inbounds=$(jq -c --arg t "$tag" --arg u "$uuid" --argjson p "$prior" '. + [($p + {tag:$t, line_uuid:$u})]' <<<"$inbounds")
+    done
+
+    doc=$(jq -n \
+        --arg now "$now" --arg node_uuid "$node_uuid" --arg node_id "$node_id" --argjson inbounds "$inbounds" --argjson old "$old" '
+        ($inbounds | map({key:.tag, value:{line_id:.line_uuid}}) | from_entries) as $v1lines
+        | $old + {
+            schema:"lattice.singbox-metadata.v2",
+            node_id:$node_id, updated_at:$now, writer:"sb",
+            inbounds:$inbounds,
+            node:(($old.node // {}) + ({node_uuid:$node_uuid, node_id:$node_id} | with_entries(select(.value != "")))),
+            lines:$v1lines,
+            reserved:(($old.reserved // {}) + {in_config_key:"_lattice",
+              fields:(($old.reserved.fields // {}) + {line_uuid:"string",node_uuid:"string",line_hash_id:"string"})})
+          }
+        | if $node_uuid != "" then .node_uuid=$node_uuid else . end')
+    lattice_meta_validate <<<"$doc" || json_err "metadata_invalid" "generated sidecar schema or UUID data is invalid" 2
+    tmp=$(mktemp "${TMPDIR:-/tmp}/lattice-meta-v2.XXXXXX") || json_err "tmp_failed" "cannot create temp file" 2
+    mkdir -p "$(dirname "$is_lattice_meta")" 2>/dev/null
+    jq . <<<"$doc" >"$tmp" || { rm -f "$tmp"; json_err "jq_failed" "failed to render v2 metadata" 2; }
+    mv "$tmp" "$is_lattice_meta"
+    cat "$is_lattice_meta"
+    exit 0
+}
+
+# Generic atomic jq edit of a sing-box config file: backup -> jq with caller
+# args -> mv -> `sing-box check` with automatic rollback on rejection. Mirrors
+# json_write_config_atomically but takes arbitrary jq --arg/--argjson pairs.
+json_edit_config_atomically() {
+    local raw_file="$1" filter="$2"
+    shift 2
+    local tmp backup errf
+    tmp=$(mktemp "${TMPDIR:-/tmp}/lattice-sb-edit.XXXXXX") || json_err "tmp_failed" "cannot create temp file" 2
+    backup="$raw_file.backup-$(date -u +%Y%m%d-%H%M%S)"
+    errf=$(mktemp "${TMPDIR:-/tmp}/lattice-sb-check.XXXXXX") || { rm -f "$tmp"; json_err "tmp_failed" "cannot create temp file" 2; }
+    cp -p "$raw_file" "$backup" || { rm -f "$tmp" "$errf"; json_err "backup_failed" "cannot backup $raw_file" 2; }
+    if ! jq "$@" "$filter" "$raw_file" >"$tmp"; then
+        rm -f "$tmp" "$errf"
+        json_err "jq_failed" "failed to update $raw_file" 2
+    fi
+    mv "$tmp" "$raw_file" || { rm -f "$tmp" "$errf"; json_err "write_failed" "failed to replace $raw_file" 2; }
+    if ! "$is_core_bin" check -c "$raw_file" >"$errf" 2>&1; then
+        mv "$backup" "$raw_file" 2>/dev/null || true
+        local check_error
+        check_error=$(tail -n 20 "$errf" 2>/dev/null)
+        rm -f "$errf"
+        jq -nc --arg error "config_invalid" --arg message "sing-box rejected updated config; rolled back" --arg detail "$check_error" \
+            '{ok:false,error:$error,message:$message,detail:$detail}'
+        exit 1
+    fi
+    rm -f "$errf"
+}
+
+# stats on|off [listen] -> toggle the experimental V2Ray stats API in config.json
+# (design-15 §8 / ADR-004). Loopback listens only: a stats API must never bind a
+# routable address.
+cmd_json_stats() {
+    is_json_out=1
+    local op="$1" listen="${2:-127.0.0.1:8080}"
+    [[ $op == "on" || $op == "off" ]] || json_err "invalid_action" "stats action must be on or off" 2
+    [[ -f $is_config_json ]] || json_err "not_found" "config.json not found: $is_config_json" 2
+    if [[ $op == "on" ]]; then
+        local host
+        host=${listen%:*}
+        if [[ $host == localhost || $host == "[::1]" ]]; then
+            :
+        elif [[ $host =~ ^127\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] \
+            && [[ ${BASH_REMATCH[1]} -le 255 && ${BASH_REMATCH[2]} -le 255 && ${BASH_REMATCH[3]} -le 255 ]]; then
+            :
+        else
+            json_err "invalid_listen" "stats listen must use a literal loopback address or localhost" 2
+        fi
+        local port="${listen##*:}"
+        [[ $port =~ ^[0-9]+$ && $port -ge 1 && $port -le 65535 ]] || json_err "invalid_listen" "stats listen port is invalid" 2
+        json_edit_config_atomically "$is_config_json" \
+            '.experimental.v2ray_api = {listen:$l, stats:{enabled:true}}' --arg l "$listen"
+    else
+        json_edit_config_atomically "$is_config_json" \
+            'del(.experimental.v2ray_api) | if (.experimental // {} | length) == 0 then del(.experimental) else . end'
+    fi
+    manage restart "$is_core" >/dev/null 2>&1 || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
+    jq -nc --arg action "$op" --arg listen "$listen" '{ok:true,stats:$action,listen:(if $action=="on" then $listen else "" end)}'
     exit 0
 }
 
@@ -2296,21 +2440,12 @@ cmd_json_conncheck() {
     [[ $timeout_sec ]] || timeout_sec=10
     [[ $timeout_sec =~ ^[0-9]+$ && $timeout_sec -ge 2 && $timeout_sec -le 60 ]] || json_err "invalid_timeout" "timeout_sec must be 2-60" 2
 
-    local matches=() cleaned=() f
-    if [[ -f $is_conf_dir/$name ]]; then
-        matches=("$name")
-    elif [[ -f $is_conf_dir/$name.json ]]; then
-        matches=("$name.json")
-    elif [[ -d $is_conf_dir ]]; then
-        readarray -t matches <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -F -i -- "$name" | sed '/dynamic-port-.*-link/d')"
-    fi
-    for f in "${matches[@]}"; do
-        [[ $f && $f =~ \.json$ ]] && cleaned+=("$f")
-    done
-    [[ ${#cleaned[@]} -eq 0 ]] && json_err "not_found" "no line matches: $name" 2
-    [[ ${#cleaned[@]} -gt 1 ]] && json_err "ambiguous" "multiple lines match: $name" 2
+    local resolved resolve_rc
+    resolved=$(json_resolve_config_file "$name" 2>&1)
+    resolve_rc=$?
+    [[ $resolve_rc -eq 0 ]] || { printf '%s\n' "$resolved"; exit "$resolve_rc"; }
 
-    is_config_file="${cleaned[0]}"
+    is_config_file="$resolved"
     is_dont_show_info=1
     is_dont_test_host=1
     info "$is_config_file" >/dev/null 2>&1
@@ -2656,6 +2791,12 @@ main() {
         ;;
     user)
         cmd_json_user "$2" "$3" "$4"
+        ;;
+    meta)
+        cmd_json_meta
+        ;;
+    stats)
+        cmd_json_stats "$2" "$3"
         ;;
     a | add | gen | no-auto-tls)
         [[ $1 == 'gen' ]] && is_gen=1
