@@ -32,6 +32,13 @@ jobs:
             echo "is_sh_ver not found in sing-box.sh" >&2
             exit 1
           fi
+          case "${version}" in
+            v[0-9]*.[0-9]*.[0-9]*-alpha.[0-9]*|v[0-9]*.[0-9]*.[0-9]*-beta.[0-9]*|v[0-9]*.[0-9]*.[0-9]*-rc.[0-9]*) ;;
+            *)
+              echo "main-branch script releases must use an explicit prerelease version" >&2
+              exit 1
+              ;;
+          esac
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
       - name: Build Release Archive
@@ -51,8 +58,9 @@ jobs:
 
             Commit: `${{ github.sha }}`
           generateReleaseNotes: true
-          makeLatest: true
+          makeLatest: false
           name: ${{ steps.version.outputs.version }}
+          prerelease: true
           removeArtifacts: true
           replacesArtifacts: true
           tag: ${{ steps.version.outputs.version }}
