@@ -2340,6 +2340,61 @@ cmd_json_stats() {
     exit 0
 }
 
+# api on|off [listen] -> toggle the experimental Clash API in config.json.
+# Loopback listens only: the Clash API must never bind a routable address.
+cmd_json_api() {
+    is_json_out=1
+    local op="$1" listen="${2:-127.0.0.1:9090}"
+    [[ $op == "on" || $op == "off" ]] || json_err "invalid_action" "api action must be on or off" 2
+    [[ -f $is_config_json ]] || json_err "not_found" "config.json not found: $is_config_json" 2
+    if [[ $op == "on" ]]; then
+        local host
+        host=${listen%:*}
+        if [[ $host == localhost || $host == "[::1]" ]]; then
+            :
+        elif [[ $host =~ ^127\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] \
+            && [[ ${BASH_REMATCH[1]} -le 255 && ${BASH_REMATCH[2]} -le 255 && ${BASH_REMATCH[3]} -le 255 ]]; then
+            :
+        else
+            json_err "invalid_listen" "api listen must use a literal loopback address or localhost" 2
+        fi
+        local port="${listen##*:}"
+        [[ $port =~ ^[0-9]+$ && $port -ge 1 && $port -le 65535 ]] || json_err "invalid_listen" "api listen port is invalid" 2
+
+        local secret_path="${is_clash_api_secret:-/etc/sing-box/lattice-clash-api.secret}"
+        local secret secret_dir secret_tmp first_uuid
+        if [[ -f $secret_path ]]; then
+            secret=$(<"$secret_path")
+        else
+            get_uuid
+            first_uuid=${tmp_uuid//-/}
+            get_uuid
+            secret="${first_uuid}${tmp_uuid//-/}"
+            [[ $secret =~ ^[0-9a-fA-F]{64}$ ]] || json_err "secret_failed" "failed to generate Clash API secret" 2
+            secret_dir=${secret_path%/*}
+            secret_tmp=$(mktemp "$secret_dir/.lattice-clash-api.secret.XXXXXX") || json_err "tmp_failed" "cannot create temp file" 2
+            printf '%s\n' "$secret" >"$secret_tmp" || { rm -f "$secret_tmp"; json_err "write_failed" "failed to write Clash API secret" 2; }
+            chmod 0600 "$secret_tmp" || { rm -f "$secret_tmp"; json_err "write_failed" "failed to secure Clash API secret" 2; }
+            chown root:root "$secret_tmp" || { rm -f "$secret_tmp"; json_err "write_failed" "failed to own Clash API secret" 2; }
+            mv "$secret_tmp" "$secret_path" || { rm -f "$secret_tmp"; json_err "write_failed" "failed to replace Clash API secret" 2; }
+        fi
+        json_edit_config_atomically "$is_config_json" \
+            '.experimental.clash_api = {external_controller:$l, secret:$s}' --arg l "$listen" --arg s "$secret"
+    else
+        # Keep the secret file so toggling the API back on preserves collector access.
+        json_edit_config_atomically "$is_config_json" \
+            'del(.experimental.clash_api) | if (.experimental // {} | length) == 0 then del(.experimental) else . end'
+    fi
+    manage restart "$is_core" >/dev/null 2>&1 || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
+    if [[ $op == "on" ]]; then
+        jq -nc --arg action "$op" --arg listen "$listen" --arg secret_path "$secret_path" \
+            '{ok:true,api:$action,listen:$listen,secret_path:$secret_path}'
+    else
+        jq -nc --arg action "$op" '{ok:true,api:$action}'
+    fi
+    exit 0
+}
+
 conncheck_now_ms() {
     local now
     now=$(date +%s%3N 2>/dev/null)
@@ -2797,6 +2852,9 @@ main() {
         ;;
     stats)
         cmd_json_stats "$2" "$3"
+        ;;
+    api)
+        cmd_json_api "$2" "$3"
         ;;
     a | add | gen | no-auto-tls)
         [[ $1 == 'gen' ]] && is_gen=1
