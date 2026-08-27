@@ -1303,12 +1303,26 @@ get() {
         [[ ! $uuid ]] && get_uuid && uuid=$tmp_uuid
         ;;
     file)
-        is_file_str=$2
+        is_file_str=${2-}
         [[ ! $is_file_str ]] && is_file_str='.json$'
-        # is_all_json=("$(ls $is_conf_dir | grep -E $is_file_str)")
-        readarray -t is_all_json <<<"$(ls $is_conf_dir | grep -E -i "$is_file_str" | sed '/dynamic-port-.*-link/d' | head -233)" # limit max 233 lines for show.
-        [[ ! $is_all_json ]] && err "无法找到相关的配置文件: $2"
-        [[ ${#is_all_json[@]} -eq 1 ]] && is_config_file=$is_all_json && is_auto_get_config=1
+        # An exact filename wins over the pattern search.
+        #
+        # $2 is used as a regex matched as a substring, so a caller that passes
+        # a real filename like foo.json also matches a foo.json.backup-<ts>
+        # sitting in the same directory. Two matches made the lookup ambiguous,
+        # and a non-interactive caller (sb --json list, which passes each
+        # filename it just enumerated) got an interactive prompt it could not
+        # answer, produced nothing, and silently dropped that line from the
+        # inventory. The default pattern .json$ is anchored and never hit this;
+        # only the pass-a-filename callers did.
+        if [[ ${2-} && -f $is_conf_dir/${2-} ]]; then
+            is_config_file=${2-}
+            is_auto_get_config=1
+        else
+            readarray -t is_all_json <<<"$(ls $is_conf_dir | grep -E -i "$is_file_str" | sed '/dynamic-port-.*-link/d' | head -233)" # limit max 233 lines for show.
+            [[ ! $is_all_json ]] && err "无法找到相关的配置文件: ${2-}"
+            [[ ${#is_all_json[@]} -eq 1 ]] && is_config_file=$is_all_json && is_auto_get_config=1
+        fi
         [[ ! $is_config_file ]] && {
             [[ $is_dont_auto_exit ]] && return
             ask get_config_file
