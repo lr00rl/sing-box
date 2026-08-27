@@ -1980,6 +1980,25 @@ line_json_obj() {
         --argjson node "$node_json" '
         def compact_obj:
             with_entries(select(.value != "" and .value != null and .value != []));
+        # A reality inbound stores its public key by parking it in a second
+        # `direct` outbound and reusing that tag as a storage slot
+        # ("public_key_<key>"). It is never a routing target, so reporting it as
+        # the outbound of this line is wrong: readers treat a non-direct outbound
+        # as evidence of a relay. Resolve the real one instead, preferring the
+        # route rule that names this inbound, then route.final, then the first
+        # outbound that is not the storage slot.
+        def real_outbound_tag:
+            ((. // "") | startswith("public_key_")) | not;
+        def resolve_outbound($tag):
+            [.outbounds[]? | select((.tag // "") | real_outbound_tag)] as $real
+            | ([(.route.rules // [])[]? | select(((.inbound // []) | index($tag)) != null) | .outbound][0]
+               // (.route.final // "")) as $candidate
+            | (if ($candidate | real_outbound_tag) then $candidate else "" end) as $routed
+            | (first($real[] | select((.tag // "") == $routed and $routed != "")) // $real[0] // {}) as $ob
+            | { tag: (if ($ob.tag // "") != "" then $ob.tag
+                      elif $routed != "" then $routed
+                      else "direct" end),
+                protocol: ($ob.type // "direct") };
         def users_for($in):
             if (($in.users // []) | length) > 0 then
                 ($in.users | map({
@@ -2002,10 +2021,7 @@ line_json_obj() {
             listen_host:($in.listen // ""),
             listen_port:($in.listen_port // null),
             users:users_for($in),
-            outbound:{
-                tag:(.outbounds[1].tag // .outbounds[0].tag // "direct"),
-                protocol:(.outbounds[1].type // .outbounds[0].type // "direct")
-            },
+            outbound:resolve_outbound($tag),
             domain:$domain,
             metadata:({
                 config_file:$tag,
