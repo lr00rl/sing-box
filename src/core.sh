@@ -1908,6 +1908,43 @@ url_qr() {
 # structured JSON on stdout. Human chrome is routed to stderr by msg()/warn()
 # and any TTY prompt becomes a json_err via the ask()/pause() guards.
 
+# Route rules do not have to live in the same file as the inbound they steer: a
+# hub keeps its inbounds in per-line files and the relay rules in a shared
+# fragment. A per-file lookup therefore reports such a line as unrouted, and a
+# reader that takes "no rule" to mean "terminal" gets it exactly backwards. Build
+# the map once across every config in the directory instead.
+#
+# The maps are also how the outbound protocol is resolved: the outbound a rule
+# names is frequently defined in the fragment too, so it cannot be found by
+# looking in the inbound file alone.
+#
+# config.json is included alongside conf/*.json because sing-box is started with
+# both (-c and -C) and a rule is equally valid in either. A file that fails to
+# parse collapses the whole slurp, which degrades to the per-file lookup rather
+# than failing: any such file would already be stopping the service.
+is_route_maps_cache=
+route_maps_json() {
+    if [[ ! $is_route_maps_cache ]]; then
+        is_route_maps_cache=$(jq -s -c '
+            {
+              routes: ([ .[]
+                         | (.route.rules // [])[]?
+                         | select((.outbound // "") != "")
+                         | . as $rule
+                         | ($rule.inbound // [])[]?
+                         | {key: ., value: $rule.outbound} ]
+                       | reverse | from_entries),
+              types:  ([ .[]
+                         | .outbounds[]?
+                         | select((.tag // "") != "")
+                         | {key: .tag, value: (.type // "")} ]
+                       | reverse | from_entries)
+            }' "$is_config_json" "$is_conf_dir"/*.json 2>/dev/null)
+        [[ $is_route_maps_cache ]] || is_route_maps_cache='{"routes":{},"types":{}}'
+    fi
+    printf '%s' "$is_route_maps_cache"
+}
+
 # Emit one node object from the vars populated by `is_dont_show_info=1; info <file>`.
 json_node_obj() {
     local eff_port=$port
@@ -1921,7 +1958,8 @@ json_node_obj() {
     local lattice_obj
     lattice_obj=$(lattice_meta_obj_for "$is_config_name" "$raw_file")
     if [[ -f $raw_file ]]; then
-        enrich=$(jq -c --arg tag "$is_config_name" --argjson lat "$lattice_obj" '
+        enrich=$(jq -c --arg tag "$is_config_name" --argjson lat "$lattice_obj" \
+            --argjson maps "$(route_maps_json)" '
             def compact_obj:
                 with_entries(select(.value != "" and .value != null and .value != [] and .value != {}));
             .inbounds[0] as $in
@@ -1931,7 +1969,7 @@ json_node_obj() {
                 line_id:($lattice.line_id // ""),
                 node_identity_uuid:($lattice.node_uuid // ""),
                 listen_host:($in.listen // ""),
-                outbound_ref:([(.route.rules // [])[]? | select(((.inbound // []) | index($tag)) != null) | .outbound][0] // "")
+                outbound_ref:($maps.routes[$tag] // "")
             } | compact_obj)
             + (if (($in.users? | type) == "array") then {user_count:($in.users | length), user_known:true} else {} end)
             + (if ($metadata | length) > 0 then {metadata:$metadata} else {} end)
@@ -1977,7 +2015,8 @@ line_json_obj() {
         --arg domain "$domain" \
         --arg custom_addr "$custom_addr" \
         --argjson lat "$lattice_obj" \
-        --argjson node "$node_json" '
+        --argjson node "$node_json" \
+        --argjson maps "$(route_maps_json)" '
         def compact_obj:
             with_entries(select(.value != "" and .value != null and .value != []));
         # A reality inbound stores its public key by parking it in a second
@@ -1990,15 +2029,26 @@ line_json_obj() {
         def real_outbound_tag:
             ((. // "") | startswith("public_key_")) | not;
         def resolve_outbound($tag):
-            [.outbounds[]? | select((.tag // "") | real_outbound_tag)] as $real
-            | ([(.route.rules // [])[]? | select(((.inbound // []) | index($tag)) != null) | .outbound][0]
-               // (.route.final // "")) as $candidate
+            (($maps // {}).routes // {}) as $routes
+            | (($maps // {}).types // {}) as $types
+            | [.outbounds[]? | select((.tag // "") | real_outbound_tag)] as $real
+            | (if ($routes[$tag] // "") != "" then $routes[$tag]
+               else ([(.route.rules // [])[]? | select(((.inbound // []) | index($tag)) != null) | .outbound][0]
+                     // (.route.final // "")) end) as $candidate
             | (if ($candidate | real_outbound_tag) then $candidate else "" end) as $routed
-            | (first($real[] | select((.tag // "") == $routed and $routed != "")) // $real[0] // {}) as $ob
-            | { tag: (if ($ob.tag // "") != "" then $ob.tag
-                      elif $routed != "" then $routed
-                      else "direct" end),
-                protocol: ($ob.type // "direct") };
+            | (first($real[] | select((.tag // "") == $routed and $routed != "")) // null) as $local
+            | if $routed == "" then
+                  ($real[0] // {}) as $ob
+                  | { tag: (if ($ob.tag // "") != "" then $ob.tag else "direct" end),
+                      protocol: (if ($ob.type // "") != "" then $ob.type else "direct" end) }
+              elif $local != null then
+                  { tag: $local.tag, protocol: ($local.type // "") }
+              else
+                  # Routed to an outbound this file does not define. Name it, and
+                  # leave the protocol empty rather than guessing "direct": that
+                  # guess is what made a real relay read as terminal.
+                  { tag: $routed, protocol: ($types[$routed] // "") }
+              end;
         def users_for($in):
             if (($in.users // []) | length) > 0 then
                 ($in.users | map({
