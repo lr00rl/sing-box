@@ -1926,12 +1926,13 @@ is_route_maps_cache=
 route_maps_json() {
     if [[ ! $is_route_maps_cache ]]; then
         is_route_maps_cache=$(jq -s -c '
+            def as_list: if type == "array" then . elif type == "string" then [.] elif . == null then [] else [] end;
             {
               routes: ([ .[]
                          | (.route.rules // [])[]?
                          | select((.outbound // "") != "")
                          | . as $rule
-                         | ($rule.inbound // [])[]?
+                         | ($rule.inbound | as_list)[]
                          | {key: ., value: $rule.outbound} ]
                        | reverse | from_entries),
               types:  ([ .[]
@@ -2033,7 +2034,11 @@ line_json_obj() {
             | (($maps // {}).types // {}) as $types
             | [.outbounds[]? | select((.tag // "") | real_outbound_tag)] as $real
             | (if ($routes[$tag] // "") != "" then $routes[$tag]
-               else ([(.route.rules // [])[]? | select(((.inbound // []) | index($tag)) != null) | .outbound][0]
+               else ([(.route.rules // [])[]?
+                      | select((if (.inbound|type) == "array" then .inbound
+                                elif (.inbound|type) == "string" then [.inbound]
+                                else [] end) | index($tag) != null)
+                      | .outbound][0]
                      // (.route.final // "")) end) as $candidate
             | (if ($candidate | real_outbound_tag) then $candidate else "" end) as $routed
             | (first($real[] | select((.tag // "") == $routed and $routed != "")) // null) as $local

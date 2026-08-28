@@ -58,6 +58,13 @@ OTHER_RULE='{"outbounds":[{"type":"direct"},{"tag":"public_key_69bcoKtJXBYDQzqMt
 chk "a rule for another inbound does not apply here" \
     "$(res tagA "$NOMAP" "$OTHER_RULE")" "direct/direct"
 
+# --- sing-box accepts a scalar `inbound`, and this fleet uses both forms ----
+SCALAR_RULE='{"outbounds":[{"type":"direct"},{"tag":"relay-out","type":"vless"}],"route":{"rules":[{"inbound":"tagA","outbound":"relay-out"}]}}'
+chk "a scalar inbound in a same-file rule still routes" \
+    "$(res tagA "$NOMAP" "$SCALAR_RULE")" "relay-out/vless"
+chk "a scalar inbound naming another line does not match by substring" \
+    "$(res tag "$NOMAP" "$SCALAR_RULE")" "direct/direct"
+
 # --- cross-file routing (the case a single file cannot see) ----------------
 CROSS='{"routes":{"tagA":"[openjobs]-vircs-us-ca-home-vless"},"types":{"[openjobs]-vircs-us-ca-home-vless":"vless"}}'
 chk "cross-file rule beats the terminal look of the inbound file" \
