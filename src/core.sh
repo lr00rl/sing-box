@@ -2276,7 +2276,13 @@ json_write_config_atomically() {
             '{ok:false,error:$error,message:$message,detail:$detail}'
         exit 1
     fi
-    rm -f "$errf"
+    # The backup exists to roll the file back if the core rejects the result. Once
+    # the core has accepted it the backup has no further job, and leaving it is
+    # not free: for a conf file it is a permanent plaintext copy of that line's
+    # user credentials sitting next to the live one, and one is written on every
+    # single user add and delete, without bound. Remove it on the success path,
+    # which is what json_stats_allowlist_sync already does.
+    rm -f "$errf" "$backup"
 }
 
 # user add|del <line> <payload-json> -> mutate one inbound's user list.
@@ -2412,7 +2418,13 @@ json_edit_config_atomically() {
             '{ok:false,error:$error,message:$message,detail:$detail}'
         exit 1
     fi
-    rm -f "$errf"
+    # The backup exists to roll the file back if the core rejects the result. Once
+    # the core has accepted it the backup has no further job, and leaving it is
+    # not free: for a conf file it is a permanent plaintext copy of that line's
+    # user credentials sitting next to the live one, and one is written on every
+    # single user add and delete, without bound. Remove it on the success path,
+    # which is what json_stats_allowlist_sync already does.
+    rm -f "$errf" "$backup"
 }
 
 # The stats API counts only what its allowlists name. sing-box builds its

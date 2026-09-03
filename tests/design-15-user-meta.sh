@@ -275,6 +275,45 @@ chk "the sync wrote the allowlist" "$(jq '.experimental.v2ray_api.stats | has("i
 chk "no temp file is left beside the config" "$(ls "$(dirname "$is_config_json")" | grep -c 'config.json.stats-new')" "0"
 chmod 700 "$TMPDIR"; unset TMPDIR
 
+# --- 12. a successful write leaves no backup behind ---------------------------
+#
+# The backup exists so the file can be rolled back if the core rejects the
+# result. Once the core has accepted it, the backup has no job left, and for a
+# conf file it is a plaintext copy of that line's user credentials sitting next
+# to the live one. One was written on every user add and delete and never
+# removed, so a node accumulated them without bound.
+#
+# This also removes a flake. The assertion in section 9 greps the config
+# directory for leftovers, and `cmd_json_stats` writes through
+# json_edit_config_atomically, so it left one about 70% of the time: the names
+# carry one-second granularity, and a second write inside the same second
+# happened to delete the first by reusing its name.
+manage() { :; }
+is_core_bin=$(command -v true)
+cat >"$is_conf_dir/backup-probe.json" <<'EOF'
+{"inbounds":[{"tag":"backup-probe.json","type":"vless","listen_port":9555,"users":[]}]}
+EOF
+out=$(cmd_json_user add backup-probe.json '{"name":"u_7777777777777777","uuid":"77777777-7777-4777-8777-777777777777"}' 2>&1) || true
+chk "the user was added" "$(jq '(.inbounds[0].users // []) | length' "$is_conf_dir/backup-probe.json")" "1"
+chk "no credential-bearing backup survives a successful add" "$(ls "$is_conf_dir" | grep -c 'backup-probe.json.backup-')" "0"
+
+# Repeat across several writes: one leftover per mutation is the shape that
+# accumulated in production, and a single-write test would not show it.
+for i in 1 2 3; do
+  cmd_json_user del backup-probe.json '{"name":"u_7777777777777777","uuid":"77777777-7777-4777-8777-777777777777"}' >/dev/null 2>&1 || true
+  cmd_json_user add backup-probe.json '{"name":"u_7777777777777777","uuid":"77777777-7777-4777-8777-777777777777"}' >/dev/null 2>&1 || true
+done
+chk "nor after several mutations" "$(ls "$is_conf_dir" | grep -c 'backup-probe.json.backup-')" "0"
+
+# A rejected write must still roll back, and must not leave the backup either.
+before=$(jq -c . "$is_conf_dir/backup-probe.json")
+is_core_bin=$(command -v false)
+out=$(cmd_json_user del backup-probe.json '{"name":"u_7777777777777777","uuid":"77777777-7777-4777-8777-777777777777"}' 2>&1) || true
+chk "a rejected write rolls the file back" "$(jq -c . "$is_conf_dir/backup-probe.json")" "$before"
+chk "and leaves no backup" "$(ls "$is_conf_dir" | grep -c 'backup-probe.json.backup-')" "0"
+is_core_bin=$(command -v true)
+rm -f "$is_conf_dir/backup-probe.json"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]
