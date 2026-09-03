@@ -124,6 +124,29 @@ out=$(json_node_obj)
 chk "both inbounds are counted, not just the first" "$(naming <<<"$out")" "1/2"
 chk "user_count still reports the first inbound alone" "$(jq -r .user_count <<<"$out")" "1"
 
+# The count must use the predicate json_stats_allowlist_sync matches names with,
+# not one that merely agrees with it in the cases anyone happened to try. jq's
+# `//` substitutes on false and null only, so a truthiness test lets a name that
+# is a number or a boolean through as named, while the allowlist requires a
+# string and would never count it. That direction misleads: it tells an operator
+# a credential is individually countable when the thing that decides counting
+# says it is not.
+#
+# Real sing-box is Go with a typed Name string, so `check` rejects this and it
+# cannot arrive through anything sb writes. That is an external guarantee
+# holding two internal definitions in agreement, and it is cheaper to close than
+# to depend on.
+is_config_name=badnames.json
+cat >"$is_conf_dir/$is_config_name" <<'EOF'
+{"inbounds":[{"tag":"badnames.json","type":"vless","listen_port":6,
+"users":[{"name":true},{"name":123},{"name":"u_1111111111111111"},{"name":""},
+         {"uuid":"11111111-1111-4111-8111-111111111111"}]}]}
+EOF
+out=$(json_node_obj)
+chk "only a non-empty string name counts as named" "$(naming <<<"$out")" "1/4"
+allow=$(jq '[.inbounds[] | (.users // [])[] | .name | select(type == "string" and . != "")] | length'     "$is_conf_dir/$is_config_name")
+chk "and it agrees with what the stats allowlist would match"     "$(jq -r '.metadata.named_users' <<<"$out")" "$allow"
+
 is_config_name=nousers.json
 printf '%s\n' '{"inbounds":[{"tag":"nousers.json","type":"vless","listen_port":5}]}' >"$is_conf_dir/$is_config_name"
 chk "a file with no credentials reports neither count" "$(json_node_obj | naming)" "-/-"

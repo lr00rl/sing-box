@@ -1995,7 +1995,12 @@ json_node_obj() {
             # across every inbound in the file, unlike user_count above, which
             # is the first inbound alone.
             | [(.inbounds // [])[] | (.users // [])[]] as $users
-            | ($users | map(select((.name // "") != "")) | length) as $named
+            # The same predicate json_stats_allowlist_sync matches names with,
+            # not one that happens to agree with it. `//` substitutes on false
+            # and null only, so a name that is a number or a boolean passes a
+            # truthiness test and would be reported as countable while the
+            # allowlist, which requires a string, never counts it.
+            | ([$users[] | .name | select(type == "string" and . != "")] | length) as $named
             | ((($lattice // {}) | with_entries(select((.value | type) == "string" and .value != "")))
                + (if ($tags | length) > 0 then {inbound_tags:($tags | tojson)} else {} end)
                + (if ($users | length) > 0
