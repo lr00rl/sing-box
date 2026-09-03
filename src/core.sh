@@ -681,6 +681,9 @@ create() {
         [[ $is_caddy && $host && ! $is_no_auto_tls ]] && {
             create caddy $net
         }
+        # A new line means a new inbound tag, and an outbound tag when the line
+        # carries one. Neither is counted until the stats allowlist names it.
+        json_stats_allowlist_sync || warn "stats 计数白名单更新失败, 新线路暂不会被计数."
         # restart core
         manage restart &
         ;;
@@ -1006,6 +1009,9 @@ del() {
         # drop the Lattice sidecar entry only on a standalone delete; create()'s
         # internal rewrite (is_new_json set) handles rename cleanup itself.
         [[ ! $is_new_json ]] && lattice_meta_del_line "$is_config_file"
+        # Drop the deleted line's tags and users from the stats allowlist, so a
+        # stale name cannot be reused by a later line and inherit its counter.
+        [[ ! $is_new_json ]] && { json_stats_allowlist_sync || warn "stats 计数白名单更新失败, 已删除线路的条目仍在名单内."; }
         [[ ! $is_new_json ]] && manage restart &
         [[ ! $is_no_del_msg ]] && _green "\n已删除: $is_config_file\n"
 
@@ -2249,7 +2255,10 @@ json_line_user_matches_filter='
 json_write_config_atomically() {
     local raw_file="$1" filter="$2" user_json="$3"
     local tmp backup errf
-    tmp=$(mktemp "${TMPDIR:-/tmp}/lattice-sb-user.XXXXXX") || json_err "tmp_failed" "cannot create temp file" 2
+    # A sibling of the target: mv is atomic only within one filesystem, and
+    # $TMPDIR is often elsewhere, which would turn a crash mid-write into a
+    # truncated config file with no rollback.
+    tmp=$(mktemp "$raw_file.user-new.XXXXXX") || json_err "tmp_failed" "cannot create temp file" 2
     backup="$raw_file.backup-$(date -u +%Y%m%d-%H%M%S)"
     errf=$(mktemp "${TMPDIR:-/tmp}/lattice-sb-check.XXXXXX") || { rm -f "$tmp"; json_err "tmp_failed" "cannot create temp file" 2; }
     cp -p "$raw_file" "$backup" || { rm -f "$tmp" "$errf"; json_err "backup_failed" "cannot backup $raw_file" 2; }
@@ -2278,7 +2287,7 @@ cmd_json_user() {
     [[ $payload ]] || json_err "missing_payload" "user payload json is required" 2
     jq -e . >/dev/null <<<"$payload" || json_err "invalid_payload" "user payload must be valid json" 2
 
-    local config_file resolve_out resolve_rc raw_file user_json filter count_before count_after
+    local config_file resolve_out resolve_rc raw_file user_json filter count_before count_after stats_sync=ok
     resolve_out=$(json_resolve_config_file "$name")
     resolve_rc=$?
     if [[ $resolve_rc != 0 ]]; then
@@ -2306,9 +2315,21 @@ cmd_json_user() {
     json_write_config_atomically "$raw_file" "$filter" "$user_json"
     count_after=$(jq '(.inbounds[0].users // []) | length' "$raw_file" 2>/dev/null)
     [[ $count_after =~ ^[0-9]+$ ]] || count_after=0
+    # Before the restart, so the new user list and the counter allowlist reach
+    # the core together and a user add costs one restart, not two.
+    #
+    # A failure here must not skip the restart. The user row is already written
+    # to disk at this point, and on `user del` that row is a revoked credential
+    # that stays live on the running proxy until something restarts it. Stale
+    # counters are the smaller problem by a wide margin, so warn and carry on;
+    # the caller learns about it from stats_allowlist_stale in the result.
+    stats_sync=ok
+    json_stats_allowlist_sync || stats_sync=stale
     manage restart "$is_core" >/dev/null 2>&1 || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
     jq -nc --arg action "$op" --arg line "$config_file" --argjson before "$count_before" --argjson after "$count_after" \
-        '{ok:true,action:$action,line:$line,user_count_before:$before,user_count_after:$after}'
+        --argjson stale "$([ "$stats_sync" = stale ] && echo true || echo false)" \
+        '{ok:true,action:$action,line:$line,user_count_before:$before,user_count_after:$after}
+         + (if $stale then {stats_allowlist_stale:true} else {} end)'
     exit 0
 }
 
@@ -2372,7 +2393,8 @@ json_edit_config_atomically() {
     local raw_file="$1" filter="$2"
     shift 2
     local tmp backup errf
-    tmp=$(mktemp "${TMPDIR:-/tmp}/lattice-sb-edit.XXXXXX") || json_err "tmp_failed" "cannot create temp file" 2
+    # A sibling of the target, for the same reason as above.
+    tmp=$(mktemp "$raw_file.edit-new.XXXXXX") || json_err "tmp_failed" "cannot create temp file" 2
     backup="$raw_file.backup-$(date -u +%Y%m%d-%H%M%S)"
     errf=$(mktemp "${TMPDIR:-/tmp}/lattice-sb-check.XXXXXX") || { rm -f "$tmp"; json_err "tmp_failed" "cannot create temp file" 2; }
     cp -p "$raw_file" "$backup" || { rm -f "$tmp" "$errf"; json_err "backup_failed" "cannot backup $raw_file" 2; }
@@ -2393,12 +2415,69 @@ json_edit_config_atomically() {
     rm -f "$errf"
 }
 
+# The stats API counts only what its allowlists name. sing-box builds its
+# inbound, outbound and user match sets from experimental.v2ray_api.stats when
+# the service starts, and a connection matching none of them is returned
+# uncounted. An enabled stats block with empty lists therefore measures nothing,
+# and a user added after the lists were written is invisible to per-user
+# accounting until they are rewritten. Every command that changes the set of
+# tags or user names calls this.
+#
+# Recomputes the three lists from config.json plus every file in the conf dir
+# and writes them back atomically, rolling the previous config back if the core
+# rejects the result. Returns 1 on failure instead of exiting, so an
+# interactive caller can warn and carry on. A no-op when the stats API is off:
+# this never turns it on, and never changes the listen address.
+json_stats_allowlist_sync() {
+    [[ -f $is_config_json ]] || return 0
+    jq -e '.experimental.v2ray_api.stats.enabled == true' "$is_config_json" >/dev/null 2>&1 || return 0
+
+    local files=("$is_config_json") f allow tmp backup
+    for f in "$is_conf_dir"/*.json; do
+        [[ -f $f ]] && files+=("$f")
+    done
+    # Only users carrying a name: the allowlist matches on name, so an unnamed
+    # legacy user cannot be counted individually and its traffic stays in the
+    # inbound total.
+    allow=$(jq -sc '{
+        inbounds:  [.[] | (.inbounds  // [])[] | .tag  | select(type == "string" and . != "")] | unique,
+        outbounds: [.[] | (.outbounds // [])[] | .tag  | select(type == "string" and . != "")] | unique,
+        users:     [.[] | (.inbounds  // [])[] | (.users // [])[] | .name | select(type == "string" and . != "")] | unique
+    }' "${files[@]}" 2>/dev/null) || return 1
+    [[ $allow ]] || return 1
+
+    if [[ $(jq -cS '.experimental.v2ray_api.stats' "$is_config_json" 2>/dev/null) \
+       == $(jq -cS --argjson a "$allow" '{enabled:true} + $a' <<<'{}' 2>/dev/null) ]]; then
+        return 0
+    fi
+
+    # A sibling of the target, not $TMPDIR: mv is only atomic within one
+    # filesystem, and $TMPDIR is frequently somewhere else (the agent gives a
+    # task its own /tmp). Across filesystems mv falls back to copy-then-unlink,
+    # which turns a crash mid-write into a truncated config.json with no
+    # rollback, on the one file the node cannot start without.
+    tmp=$(mktemp "$is_config_json.stats-new.XXXXXX") || return 1
+    backup="$is_config_json.backup-$(date -u +%Y%m%d-%H%M%S)"
+    cp -p "$is_config_json" "$backup" || { rm -f "$tmp"; return 1; }
+    if ! jq --argjson a "$allow" '.experimental.v2ray_api.stats = ({enabled:true} + $a)' "$is_config_json" >"$tmp"; then
+        rm -f "$tmp" "$backup"
+        return 1
+    fi
+    mv "$tmp" "$is_config_json" || { rm -f "$tmp" "$backup"; return 1; }
+    if ! "$is_core_bin" check -c "$is_config_json" -C "$is_conf_dir" >/dev/null 2>&1; then
+        mv "$backup" "$is_config_json" 2>/dev/null || true
+        return 1
+    fi
+    rm -f "$backup"
+    return 0
+}
+
 # stats on|off [listen] -> toggle the experimental V2Ray stats API in config.json
 # (design-15 §8 / ADR-004). Loopback listens only: a stats API must never bind a
 # routable address.
 cmd_json_stats() {
     is_json_out=1
-    local op="$1" listen="${2:-127.0.0.1:8080}"
+    local op="$1" listen="${2:-127.0.0.1:8080}" stats_sync=ok
     [[ $op == "on" || $op == "off" ]] || json_err "invalid_action" "stats action must be on or off" 2
     [[ -f $is_config_json ]] || json_err "not_found" "config.json not found: $is_config_json" 2
     if [[ $op == "on" ]]; then
@@ -2416,12 +2495,21 @@ cmd_json_stats() {
         [[ $port =~ ^[0-9]+$ && $port -ge 1 && $port -le 65535 ]] || json_err "invalid_listen" "stats listen port is invalid" 2
         json_edit_config_atomically "$is_config_json" \
             '.experimental.v2ray_api = {listen:$l, stats:{enabled:true}}' --arg l "$listen"
+        # Enabling the API without the allowlists produces a stats service that
+        # counts nothing, which reads as "usage collection is on" while every
+        # counter stays at zero. Report that rather than exiting: the enable is
+        # already on disk, and exiting here would skip the restart below and
+        # leave the node running neither the old config nor the new one.
+        json_stats_allowlist_sync || stats_sync=stale
     else
         json_edit_config_atomically "$is_config_json" \
             'del(.experimental.v2ray_api) | if (.experimental // {} | length) == 0 then del(.experimental) else . end'
     fi
     manage restart "$is_core" >/dev/null 2>&1 || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
-    jq -nc --arg action "$op" --arg listen "$listen" '{ok:true,stats:$action,listen:(if $action=="on" then $listen else "" end)}'
+    jq -nc --arg action "$op" --arg listen "$listen" \
+        --argjson stale "$([ "${stats_sync:-ok}" = stale ] && echo true || echo false)" \
+        '{ok:true,stats:$action,listen:(if $action=="on" then $listen else "" end)}
+         + (if $stale then {stats_allowlist_stale:true} else {} end)'
     exit 0
 }
 
