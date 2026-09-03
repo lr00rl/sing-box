@@ -4,7 +4,7 @@
 set -u
 CORE="$(cd "$(dirname "$0")/.." && pwd)/src/core.sh"
 TMP=$(mktemp -d /tmp/sb-meta-test.XXXXXX)
-trap 'rm -rf "$TMP"' EXIT
+
 PASS=0; FAIL=0
 # Several functions under test end in an explicit `exit`. Called outside a
 # subshell one of them kills this script mid-run, which prints no summary and
@@ -12,7 +12,27 @@ PASS=0; FAIL=0
 # one. That happened here once and was only caught by counting ok lines by
 # hand. This makes it loud instead.
 REACHED_END=0
-trap 'if [ "$REACHED_END" != 1 ]; then echo; echo "ABORTED: the suite exited before its summary, after $PASS assertions."; echo "  A function under test called exit outside \$(...). Wrap the call."; exit 70; fi' EXIT
+# One trap for both jobs, because a second `trap ... EXIT` REPLACES the first
+# rather than stacking. Registering the guard separately silently dropped the
+# temp-directory cleanup, so every run of this suite left its fixture behind:
+# the same "nothing removes it, so it accumulates" shape the change under test
+# exists to close, reproduced in the harness.
+# fd 9 is the suite's own stdout, saved before anything can redirect it. The
+# trap writes there rather than to stdout, because the case it exists for is a
+# function called as `f >/dev/null 2>&1` that exits: the redirection is still in
+# effect when the trap runs, so a plain echo goes to /dev/null and the message
+# vanishes exactly when it is needed. Verified: without this the exit status is
+# 70 and the explanation is silent.
+exec 9>&1
+trap '
+    rm -rf "$TMP"
+    if [ "$REACHED_END" != 1 ]; then
+        echo >&9
+        echo "ABORTED: the suite exited before its summary, after $PASS assertions." >&9
+        echo "  A function under test called exit outside \$(...). Wrap the call." >&9
+        exit 70
+    fi
+' EXIT
 ok()   { PASS=$((PASS+1)); echo "ok   - $1"; }
 bad()  { FAIL=$((FAIL+1)); echo "FAIL - $1"; }
 chk()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: got [$2] want [$3]"; fi; }
