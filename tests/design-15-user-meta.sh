@@ -27,7 +27,9 @@ eval "$(extract_fn lattice_meta_validate)"
 eval "$(extract_fn json_resolve_config_file)"
 eval "$(extract_fn cmd_json_meta)"
 eval "$(extract_fn json_edit_config_atomically)"
+eval "$(extract_fn json_write_config_atomically)"
 eval "$(extract_fn json_stats_allowlist_sync)"
+eval "$(extract_fn cmd_json_user)"
 eval "$(extract_fn cmd_json_stats)"
 is_config_json="$TMP/config.json"; is_core_bin=$(command -v true); is_core=sing-box
 manage() { :; }
@@ -213,6 +215,65 @@ chk "a rejected config reports failure" "$rc" "1"
 chk "a rejected config is rolled back" "$(jq -cS . "$is_config_json")" "$before"
 chk "no backup file is left behind" "$(ls "$TMP" | grep -c 'config.json.backup-')" "0"
 is_core_bin=$(command -v true)
+
+
+# --- 10. a failed allowlist sync must not skip the restart -------------------
+#
+# The user row is written to disk before the sync runs. On `user del` that row
+# is a revoked credential, and it stays live on the running proxy until
+# something restarts it. Exiting on a sync failure left the node serving a
+# credential the operator had just removed, and reported it as a stats problem.
+#
+# cmd_json_user runs inside a command substitution, so the restart is counted
+# through a file rather than a variable: a subshell's variables do not survive.
+echo '{"log":{},"dns":{},"outbounds":[{"tag":"direct","type":"direct"}],"experimental":{"v2ray_api":{"listen":"127.0.0.1:8080","stats":{"enabled":true,"inbounds":["restart-probe.json"],"outbounds":["direct"],"users":["u_9999999999999999"]}}}}' >"$is_config_json"
+mkuser() {
+  cat >"$is_conf_dir/restart-probe.json" <<EOF
+{"inbounds":[{"tag":"restart-probe.json","type":"vless","listen_port":9444,
+"users":[{"name":"$1","uuid":"$2"}]}]}
+EOF
+}
+RESTARTS="$TMP/restarts"
+manage() { echo x >>"$RESTARTS"; }
+restart_count() { [ -f "$RESTARTS" ] && wc -l <"$RESTARTS" | tr -d ' ' || echo 0; }
+
+mkuser u_9999999999999999 99999999-9999-4999-8999-999999999999
+: >"$RESTARTS"
+out=$(cmd_json_user del restart-probe.json '{"name":"u_9999999999999999","uuid":"99999999-9999-4999-8999-999999999999"}' 2>&1) || true
+chk "a healthy user del restarts" "$(restart_count)" "1"
+chk "the user is gone from disk" "$(jq '(.inbounds[0].users // []) | length' "$is_conf_dir/restart-probe.json")" "0"
+chk "the healthy path reports no staleness" "$(jq 'has("stats_allowlist_stale")' <<<"$out")" "false"
+
+# Fail the sync the way it fails in the field: an unrelated file in the conf
+# directory that jq cannot parse. The user write itself still succeeds, which
+# is what makes the skipped restart dangerous rather than merely untidy.
+mkuser u_8888888888888888 88888888-8888-4888-8888-888888888888
+printf 'not json at all\n' >"$is_conf_dir/broken-sidecar.json"
+: >"$RESTARTS"
+out=$(cmd_json_user del restart-probe.json '{"name":"u_8888888888888888","uuid":"88888888-8888-4888-8888-888888888888"}' 2>&1) || true
+chk "the revoked user is gone from disk" "$(jq '(.inbounds[0].users // []) | length' "$is_conf_dir/restart-probe.json")" "0"
+if [ "$(restart_count)" -ge 1 ]; then ok "a failed allowlist sync still restarts"; else bad "a failed allowlist sync skipped the restart: the revoked user stays live (out=$out)"; fi
+chk "the failure is reported, not hidden" "$(jq 'has("stats_allowlist_stale")' <<<"$out" 2>/dev/null)" "true"
+rm -f "$is_conf_dir/broken-sidecar.json" "$is_conf_dir/restart-probe.json"
+manage() { :; }
+
+# --- 11. the config is replaced by a rename within its own filesystem --------
+#
+# mv is atomic only inside one filesystem. With the temp file in $TMPDIR it
+# falls back to copy-then-unlink across a boundary, and a crash mid-write
+# leaves a truncated config.json with no rollback, on the one file the node
+# cannot start without. The agent gives a task its own /tmp, so the boundary is
+# the normal case rather than the exotic one.
+# TMPDIR is made unwritable rather than merely observed: that is the only way
+# to assert the staging file is not put there, since a run that stages in
+# TMPDIR and then moves the file away leaves the directory empty either way.
+export TMPDIR="$TMP/elsewhere"; mkdir -p "$TMPDIR"; chmod 500 "$TMPDIR"
+jq '.experimental.v2ray_api.stats = {enabled:true}' "$is_config_json" >"$TMP/u" && mv "$TMP/u" "$is_config_json"
+json_stats_allowlist_sync; rc=$?
+chk "the sync does not need a writable TMPDIR" "$rc" "0"
+chk "the sync wrote the allowlist" "$(jq '.experimental.v2ray_api.stats | has("inbounds")' "$is_config_json")" "true"
+chk "no temp file is left beside the config" "$(ls "$(dirname "$is_config_json")" | grep -c 'config.json.stats-new')" "0"
+chmod 700 "$TMPDIR"; unset TMPDIR
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
