@@ -1978,7 +1978,16 @@ json_node_obj() {
                 with_entries(select(.value != "" and .value != null and .value != [] and .value != {}));
             .inbounds[0] as $in
             | ($lat // {}) as $lattice
-            | (($lattice // {}) | with_entries(select((.value | type) == "string" and .value != ""))) as $metadata
+            # Every inbound tag this file actually defines. `name` above is the
+            # conf file name, which is the inbound tag only because create()
+            # writes it that way; a hand-written file, and any file holding more
+            # than one inbound, breaks that. The core keys its stats counters and
+            # its connection log by the real tags, so a reader that only ever
+            # sees the file name cannot attribute either. JSON-encoded because a
+            # tag is an arbitrary string and the transport is a string map.
+            | ([(.inbounds // [])[] | .tag | select(type == "string" and . != "")] | unique) as $tags
+            | ((($lattice // {}) | with_entries(select((.value | type) == "string" and .value != "")))
+               + (if ($tags | length) > 0 then {inbound_tags:($tags | tojson)} else {} end)) as $metadata
             | ({
                 line_id:($lattice.line_id // ""),
                 node_identity_uuid:($lattice.node_uuid // ""),
@@ -2370,6 +2379,15 @@ cmd_json_user() {
 # anywhere get a fresh uuid. The v1 keys (.node/.lines) are kept alongside the v2
 # shape so pre-v2 readers (create/del/inspect) keep working unchanged. The server
 # remains the authoritative writer; this is the on-box fallback/repair path.
+#
+# inbounds[].tag here is the conf FILE NAME, not a sing-box inbound tag, despite
+# the word. create() writes the file name into the inbound's own tag field, so on
+# a line it created the two are the same string and the difference is invisible;
+# a hand-written file, or one holding a relay pair, carries tags of its own. This
+# slot is the sidecar's identity key (unique per document, one line_uuid each),
+# so it stays the file name. The tags the core actually loaded, which its stats
+# counters and its connection log are keyed by, are reported separately by
+# json_node_obj as metadata.inbound_tags.
 cmd_json_meta() {
     is_json_out=1
     [[ -d $is_conf_dir ]] || json_err "not_found" "conf dir not found: $is_conf_dir" 2
