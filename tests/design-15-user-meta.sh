@@ -4,8 +4,35 @@
 set -u
 CORE="$(cd "$(dirname "$0")/.." && pwd)/src/core.sh"
 TMP=$(mktemp -d /tmp/sb-meta-test.XXXXXX)
-trap 'rm -rf "$TMP"' EXIT
+
 PASS=0; FAIL=0
+# Several functions under test end in an explicit `exit`. Called outside a
+# subshell one of them kills this script mid-run, which prints no summary and
+# leaves the exit status at 0, so a truncated run looks exactly like a passing
+# one. That happened here once and was only caught by counting ok lines by
+# hand. This makes it loud instead.
+REACHED_END=0
+# One trap for both jobs, because a second `trap ... EXIT` REPLACES the first
+# rather than stacking. Registering the guard separately silently dropped the
+# temp-directory cleanup, so every run of this suite left its fixture behind:
+# the same "nothing removes it, so it accumulates" shape the change under test
+# exists to close, reproduced in the harness.
+# fd 9 is the suite's own stdout, saved before anything can redirect it. The
+# trap writes there rather than to stdout, because the case it exists for is a
+# function called as `f >/dev/null 2>&1` that exits: the redirection is still in
+# effect when the trap runs, so a plain echo goes to /dev/null and the message
+# vanishes exactly when it is needed. Verified: without this the exit status is
+# 70 and the explanation is silent.
+exec 9>&1
+trap '
+    rm -rf "$TMP"
+    if [ "$REACHED_END" != 1 ]; then
+        echo >&9
+        echo "ABORTED: the suite exited before its summary, after $PASS assertions." >&9
+        echo "  A function under test called exit outside \$(...). Wrap the call." >&9
+        exit 70
+    fi
+' EXIT
 ok()   { PASS=$((PASS+1)); echo "ok   - $1"; }
 bad()  { FAIL=$((FAIL+1)); echo "FAIL - $1"; }
 chk()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: got [$2] want [$3]"; fi; }
@@ -275,6 +302,49 @@ chk "the sync wrote the allowlist" "$(jq '.experimental.v2ray_api.stats | has("i
 chk "no temp file is left beside the config" "$(ls "$(dirname "$is_config_json")" | grep -c 'config.json.stats-new')" "0"
 chmod 700 "$TMPDIR"; unset TMPDIR
 
+# --- 12. a successful write leaves no backup behind ---------------------------
+#
+# The backup exists so the file can be rolled back if the core rejects the
+# result. Once the core has accepted it, the backup has no job left, and for a
+# conf file it is a plaintext copy of that line's user credentials sitting next
+# to the live one. One was written on every user add and delete and never
+# removed, so a node accumulated them without bound.
+#
+# This also removes a flake. The assertion in section 9 greps the config
+# directory for leftovers, and `cmd_json_stats` writes through
+# json_edit_config_atomically, so it left one about 70% of the time: the names
+# carry one-second granularity, and a second write inside the same second
+# happened to delete the first by reusing its name.
+manage() { :; }
+is_core_bin=$(command -v true)
+cat >"$is_conf_dir/backup-probe.json" <<'EOF'
+{"inbounds":[{"tag":"backup-probe.json","type":"vless","listen_port":9555,"users":[]}]}
+EOF
+out=$(cmd_json_user add backup-probe.json '{"name":"u_7777777777777777","uuid":"77777777-7777-4777-8777-777777777777"}' 2>&1) || true
+chk "the user was added" "$(jq '(.inbounds[0].users // []) | length' "$is_conf_dir/backup-probe.json")" "1"
+chk "no credential-bearing backup survives a successful add" "$(ls "$is_conf_dir" | grep -c 'backup-probe.json.backup-')" "0"
+
+# Repeat across several writes: one leftover per mutation is the shape that
+# accumulated in production, and a single-write test would not show it.
+# Every call goes through $(...): cmd_json_user ends in an explicit `exit`, so
+# calling it directly kills this script rather than returning, and the `|| true`
+# is never reached.
+for i in 1 2 3; do
+  out=$(cmd_json_user del backup-probe.json '{"name":"u_7777777777777777","uuid":"77777777-7777-4777-8777-777777777777"}' 2>&1) || true
+  out=$(cmd_json_user add backup-probe.json '{"name":"u_7777777777777777","uuid":"77777777-7777-4777-8777-777777777777"}' 2>&1) || true
+done
+chk "nor after several mutations" "$(ls "$is_conf_dir" | grep -c 'backup-probe.json.backup-')" "0"
+
+# A rejected write must still roll back, and must not leave the backup either.
+before=$(jq -c . "$is_conf_dir/backup-probe.json")
+is_core_bin=$(command -v false)
+out=$(cmd_json_user del backup-probe.json '{"name":"u_7777777777777777","uuid":"77777777-7777-4777-8777-777777777777"}' 2>&1) || true
+chk "a rejected write rolls the file back" "$(jq -c . "$is_conf_dir/backup-probe.json")" "$before"
+chk "and leaves no backup" "$(ls "$is_conf_dir" | grep -c 'backup-probe.json.backup-')" "0"
+is_core_bin=$(command -v true)
+rm -f "$is_conf_dir/backup-probe.json"
+
+REACHED_END=1
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]
