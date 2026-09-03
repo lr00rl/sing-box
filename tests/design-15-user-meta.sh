@@ -6,6 +6,13 @@ CORE="$(cd "$(dirname "$0")/.." && pwd)/src/core.sh"
 TMP=$(mktemp -d /tmp/sb-meta-test.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 PASS=0; FAIL=0
+# Several functions under test end in an explicit `exit`. Called outside a
+# subshell one of them kills this script mid-run, which prints no summary and
+# leaves the exit status at 0, so a truncated run looks exactly like a passing
+# one. That happened here once and was only caught by counting ok lines by
+# hand. This makes it loud instead.
+REACHED_END=0
+trap 'if [ "$REACHED_END" != 1 ]; then echo; echo "ABORTED: the suite exited before its summary, after $PASS assertions."; echo "  A function under test called exit outside \$(...). Wrap the call."; exit 70; fi' EXIT
 ok()   { PASS=$((PASS+1)); echo "ok   - $1"; }
 bad()  { FAIL=$((FAIL+1)); echo "FAIL - $1"; }
 chk()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: got [$2] want [$3]"; fi; }
@@ -299,9 +306,12 @@ chk "no credential-bearing backup survives a successful add" "$(ls "$is_conf_dir
 
 # Repeat across several writes: one leftover per mutation is the shape that
 # accumulated in production, and a single-write test would not show it.
+# Every call goes through $(...): cmd_json_user ends in an explicit `exit`, so
+# calling it directly kills this script rather than returning, and the `|| true`
+# is never reached.
 for i in 1 2 3; do
-  cmd_json_user del backup-probe.json '{"name":"u_7777777777777777","uuid":"77777777-7777-4777-8777-777777777777"}' >/dev/null 2>&1 || true
-  cmd_json_user add backup-probe.json '{"name":"u_7777777777777777","uuid":"77777777-7777-4777-8777-777777777777"}' >/dev/null 2>&1 || true
+  out=$(cmd_json_user del backup-probe.json '{"name":"u_7777777777777777","uuid":"77777777-7777-4777-8777-777777777777"}' 2>&1) || true
+  out=$(cmd_json_user add backup-probe.json '{"name":"u_7777777777777777","uuid":"77777777-7777-4777-8777-777777777777"}' 2>&1) || true
 done
 chk "nor after several mutations" "$(ls "$is_conf_dir" | grep -c 'backup-probe.json.backup-')" "0"
 
@@ -314,6 +324,7 @@ chk "and leaves no backup" "$(ls "$is_conf_dir" | grep -c 'backup-probe.json.bac
 is_core_bin=$(command -v true)
 rm -f "$is_conf_dir/backup-probe.json"
 
+REACHED_END=1
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ $FAIL -eq 0 ]
