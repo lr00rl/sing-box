@@ -2327,6 +2327,15 @@ cmd_json_user() {
 # anywhere get a fresh uuid. The v1 keys (.node/.lines) are kept alongside the v2
 # shape so pre-v2 readers (create/del/inspect) keep working unchanged. The server
 # remains the authoritative writer; this is the on-box fallback/repair path.
+#
+# inbounds[].tag here is the conf FILE NAME, not a sing-box inbound tag, despite
+# the word. create() writes the file name into the inbound's own tag field, so on
+# a line it created the two are the same string and the difference is invisible;
+# a hand-written file, or one holding a relay pair, carries tags of its own. This
+# slot is the sidecar's identity key (unique per document, one line_uuid each),
+# so it stays the file name. The tags the core actually loaded, which its stats
+# counters and its connection log are keyed by, are reported separately by
+# json_node_obj as metadata.inbound_tags.
 cmd_json_meta() {
     is_json_out=1
     [[ -d $is_conf_dir ]] || json_err "not_found" "conf dir not found: $is_conf_dir" 2
