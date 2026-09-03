@@ -1986,8 +1986,26 @@ json_node_obj() {
             # sees the file name cannot attribute either. JSON-encoded because a
             # tag is an arbitrary string and the transport is a string map.
             | ([(.inbounds // [])[] | .tag | select(type == "string" and . != "")] | unique) as $tags
+            # How many of the credentials in this file sing-box can count on
+            # their own. The stats allowlist matches users BY NAME, so an unnamed
+            # credential has no per-user counter at all and its traffic stays
+            # inside the inbound total forever. That is a permanent property of
+            # the config, not a failure to attribute, and a control plane that
+            # cannot see the difference reports the two the same way. Counted
+            # across every inbound in the file, unlike user_count above, which
+            # is the first inbound alone.
+            | [(.inbounds // [])[] | (.users // [])[]] as $users
+            # The same predicate json_stats_allowlist_sync matches names with,
+            # not one that happens to agree with it. `//` substitutes on false
+            # and null only, so a name that is a number or a boolean passes a
+            # truthiness test and would be reported as countable while the
+            # allowlist, which requires a string, never counts it.
+            | ([$users[] | .name | select(type == "string" and . != "")] | length) as $named
             | ((($lattice // {}) | with_entries(select((.value | type) == "string" and .value != "")))
-               + (if ($tags | length) > 0 then {inbound_tags:($tags | tojson)} else {} end)) as $metadata
+               + (if ($tags | length) > 0 then {inbound_tags:($tags | tojson)} else {} end)
+               + (if ($users | length) > 0
+                  then {named_users:($named | tostring), unnamed_users:(($users | length) - $named | tostring)}
+                  else {} end)) as $metadata
             | ({
                 line_id:($lattice.line_id // ""),
                 node_identity_uuid:($lattice.node_uuid // ""),
