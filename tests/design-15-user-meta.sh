@@ -27,6 +27,7 @@ eval "$(extract_fn lattice_meta_validate)"
 eval "$(extract_fn json_resolve_config_file)"
 eval "$(extract_fn cmd_json_meta)"
 eval "$(extract_fn json_edit_config_atomically)"
+eval "$(extract_fn json_stats_allowlist_sync)"
 eval "$(extract_fn cmd_json_stats)"
 is_config_json="$TMP/config.json"; is_core_bin=$(command -v true); is_core=sing-box
 manage() { :; }
@@ -153,6 +154,65 @@ chk "other keys intact" "$(jq 'has("log") and has("dns")' "$is_config_json")" "t
 manage() { return 1; }
 out=$(cmd_json_stats on 2>&1); rc=$?
 [ $rc -ne 0 ] && [[ $out == *restart_failed* ]] && ok "restart failure cannot report ok" || bad "restart failure cannot report ok: rc=$rc out=$out"
+manage() { :; }
+
+# --- 9. the stats allowlist names what the core has to count ------------------
+# sing-box counts only what these lists name, so "enabled" with empty lists is
+# a stats service that measures nothing.
+echo '{"log":{},"dns":{},"outbounds":[{"tag":"direct","type":"direct"},{"tag":"warp","type":"wireguard"}]}' >"$is_config_json"
+cat >"$is_conf_dir/named-users.json" <<'EOF'
+{"inbounds":[{"tag":"named-users.json","type":"vless","listen_port":9443,
+"users":[{"name":"u_1111111111111111","uuid":"aaaa"},{"uuid":"bbbb"},{"name":"","uuid":"cccc"}]}],
+"outbounds":[{"tag":"direct","type":"direct"}]}
+EOF
+out=$(cmd_json_stats on 2>/dev/null)
+chk "stats on still reports ok" "$(jq -r .stats <<<"$out")" "on"
+chk "allowlist carries every inbound tag" \
+  "$(jq -r '.experimental.v2ray_api.stats.inbounds | sort | join(",")' "$is_config_json")" \
+  "named-users.json,trojan-8443.json,vless-443.json"
+chk "allowlist carries every outbound tag, deduplicated" \
+  "$(jq -r '.experimental.v2ray_api.stats.outbounds | sort | join(",")' "$is_config_json")" \
+  "direct,warp"
+chk "allowlist carries named users only" \
+  "$(jq -r '.experimental.v2ray_api.stats.users | join(",")' "$is_config_json")" \
+  "u_1111111111111111"
+
+# A user added after the fact has to reach the allowlist, or its traffic is
+# counted at the line and never against the person.
+jq '.inbounds[0].users += [{"name":"u_2222222222222222","uuid":"dddd"}]' "$is_conf_dir/named-users.json" >"$TMP/u" && mv "$TMP/u" "$is_conf_dir/named-users.json"
+json_stats_allowlist_sync; rc=$?
+chk "sync after a user add succeeds" "$rc" "0"
+chk "the new user is counted" \
+  "$(jq -r '.experimental.v2ray_api.stats.users | sort | join(",")' "$is_config_json")" \
+  "u_1111111111111111,u_2222222222222222"
+
+# Deleting a line drops its tags, so a later line reusing the name cannot
+# inherit the old counter.
+rm -f "$is_conf_dir/named-users.json"
+json_stats_allowlist_sync
+chk "a deleted line leaves the allowlist" \
+  "$(jq -r '.experimental.v2ray_api.stats.inbounds | index("named-users.json") // "absent"' "$is_config_json")" \
+  "absent"
+chk "its users leave with it" \
+  "$(jq -r '.experimental.v2ray_api.stats.users | length' "$is_config_json")" \
+  "0"
+
+# Off means off: the sync never enables the API on its own.
+before=$(jq -cS . "$is_config_json")
+jq 'del(.experimental)' "$is_config_json" >"$TMP/u" && mv "$TMP/u" "$is_config_json"
+json_stats_allowlist_sync; rc=$?
+chk "sync is a no-op while stats are off" "$rc" "0"
+chk "sync does not enable the API" "$(jq 'has("experimental")' "$is_config_json")" "false"
+
+# A config the core rejects is rolled back, and the caller is told.
+jq '.experimental.v2ray_api={listen:"127.0.0.1:8080",stats:{enabled:true}}' "$is_config_json" >"$TMP/u" && mv "$TMP/u" "$is_config_json"
+before=$(jq -cS . "$is_config_json")
+is_core_bin=$(command -v false)
+json_stats_allowlist_sync; rc=$?
+chk "a rejected config reports failure" "$rc" "1"
+chk "a rejected config is rolled back" "$(jq -cS . "$is_config_json")" "$before"
+chk "no backup file is left behind" "$(ls "$TMP" | grep -c 'config.json.backup-')" "0"
+is_core_bin=$(command -v true)
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

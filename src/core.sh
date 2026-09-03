@@ -681,6 +681,9 @@ create() {
         [[ $is_caddy && $host && ! $is_no_auto_tls ]] && {
             create caddy $net
         }
+        # A new line means a new inbound tag, and an outbound tag when the line
+        # carries one. Neither is counted until the stats allowlist names it.
+        json_stats_allowlist_sync || warn "stats 计数白名单更新失败, 新线路暂不会被计数."
         # restart core
         manage restart &
         ;;
@@ -1006,6 +1009,9 @@ del() {
         # drop the Lattice sidecar entry only on a standalone delete; create()'s
         # internal rewrite (is_new_json set) handles rename cleanup itself.
         [[ ! $is_new_json ]] && lattice_meta_del_line "$is_config_file"
+        # Drop the deleted line's tags and users from the stats allowlist, so a
+        # stale name cannot be reused by a later line and inherit its counter.
+        [[ ! $is_new_json ]] && { json_stats_allowlist_sync || warn "stats 计数白名单更新失败, 已删除线路的条目仍在名单内."; }
         [[ ! $is_new_json ]] && manage restart &
         [[ ! $is_no_del_msg ]] && _green "\n已删除: $is_config_file\n"
 
@@ -2306,6 +2312,9 @@ cmd_json_user() {
     json_write_config_atomically "$raw_file" "$filter" "$user_json"
     count_after=$(jq '(.inbounds[0].users // []) | length' "$raw_file" 2>/dev/null)
     [[ $count_after =~ ^[0-9]+$ ]] || count_after=0
+    # Before the restart, so the new user list and the counter allowlist reach
+    # the core together and a user add costs one restart, not two.
+    json_stats_allowlist_sync || json_err "stats_allowlist_failed" "user written but the stats counter allowlist could not be updated" 1
     manage restart "$is_core" >/dev/null 2>&1 || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
     jq -nc --arg action "$op" --arg line "$config_file" --argjson before "$count_before" --argjson after "$count_after" \
         '{ok:true,action:$action,line:$line,user_count_before:$before,user_count_after:$after}'
@@ -2393,6 +2402,58 @@ json_edit_config_atomically() {
     rm -f "$errf"
 }
 
+# The stats API counts only what its allowlists name. sing-box builds its
+# inbound, outbound and user match sets from experimental.v2ray_api.stats when
+# the service starts, and a connection matching none of them is returned
+# uncounted. An enabled stats block with empty lists therefore measures nothing,
+# and a user added after the lists were written is invisible to per-user
+# accounting until they are rewritten. Every command that changes the set of
+# tags or user names calls this.
+#
+# Recomputes the three lists from config.json plus every file in the conf dir
+# and writes them back atomically, rolling the previous config back if the core
+# rejects the result. Returns 1 on failure instead of exiting, so an
+# interactive caller can warn and carry on. A no-op when the stats API is off:
+# this never turns it on, and never changes the listen address.
+json_stats_allowlist_sync() {
+    [[ -f $is_config_json ]] || return 0
+    jq -e '.experimental.v2ray_api.stats.enabled == true' "$is_config_json" >/dev/null 2>&1 || return 0
+
+    local files=("$is_config_json") f allow tmp backup
+    for f in "$is_conf_dir"/*.json; do
+        [[ -f $f ]] && files+=("$f")
+    done
+    # Only users carrying a name: the allowlist matches on name, so an unnamed
+    # legacy user cannot be counted individually and its traffic stays in the
+    # inbound total.
+    allow=$(jq -sc '{
+        inbounds:  [.[] | (.inbounds  // [])[] | .tag  | select(type == "string" and . != "")] | unique,
+        outbounds: [.[] | (.outbounds // [])[] | .tag  | select(type == "string" and . != "")] | unique,
+        users:     [.[] | (.inbounds  // [])[] | (.users // [])[] | .name | select(type == "string" and . != "")] | unique
+    }' "${files[@]}" 2>/dev/null) || return 1
+    [[ $allow ]] || return 1
+
+    if [[ $(jq -cS '.experimental.v2ray_api.stats' "$is_config_json" 2>/dev/null) \
+       == $(jq -cS --argjson a "$allow" '{enabled:true} + $a' <<<'{}' 2>/dev/null) ]]; then
+        return 0
+    fi
+
+    tmp=$(mktemp "${TMPDIR:-/tmp}/lattice-sb-stats.XXXXXX") || return 1
+    backup="$is_config_json.backup-$(date -u +%Y%m%d-%H%M%S)"
+    cp -p "$is_config_json" "$backup" || { rm -f "$tmp"; return 1; }
+    if ! jq --argjson a "$allow" '.experimental.v2ray_api.stats = ({enabled:true} + $a)' "$is_config_json" >"$tmp"; then
+        rm -f "$tmp" "$backup"
+        return 1
+    fi
+    mv "$tmp" "$is_config_json" || { rm -f "$tmp" "$backup"; return 1; }
+    if ! "$is_core_bin" check -c "$is_config_json" -C "$is_conf_dir" >/dev/null 2>&1; then
+        mv "$backup" "$is_config_json" 2>/dev/null || true
+        return 1
+    fi
+    rm -f "$backup"
+    return 0
+}
+
 # stats on|off [listen] -> toggle the experimental V2Ray stats API in config.json
 # (design-15 §8 / ADR-004). Loopback listens only: a stats API must never bind a
 # routable address.
@@ -2416,6 +2477,10 @@ cmd_json_stats() {
         [[ $port =~ ^[0-9]+$ && $port -ge 1 && $port -le 65535 ]] || json_err "invalid_listen" "stats listen port is invalid" 2
         json_edit_config_atomically "$is_config_json" \
             '.experimental.v2ray_api = {listen:$l, stats:{enabled:true}}' --arg l "$listen"
+        # Enabling the API without the allowlists produces a stats service that
+        # counts nothing, which reads as "usage collection is on" while every
+        # counter stays at zero.
+        json_stats_allowlist_sync || json_err "stats_allowlist_failed" "stats API enabled but the counter allowlist could not be written" 1
     else
         json_edit_config_atomically "$is_config_json" \
             'del(.experimental.v2ray_api) | if (.experimental // {} | length) == 0 then del(.experimental) else . end'
