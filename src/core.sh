@@ -430,7 +430,7 @@ ask() {
         is_opt_input_msg=$5
         ;;
     get_config_file)
-        is_tmp_list=("${is_all_json[@]}")
+        is_tmp_list=(${is_all_json[@]+"${is_all_json[@]}"})
         is_opt_msg="\n请选择配置:\n"
         is_ask_set=is_config_file
         ;;
@@ -1465,9 +1465,18 @@ get() {
             is_config_file=${2-}
             is_auto_get_config=1
         else
-            readarray -t is_all_json <<<"$(ls $is_conf_dir | grep -E -i "$is_file_str" | sed '/dynamic-port-.*-link/d' | head -233)" # limit max 233 lines for show.
-            [[ ! $is_all_json ]] && err "无法找到相关的配置文件: ${2-}"
-            [[ ${#is_all_json[@]} -eq 1 ]] && is_config_file=$is_all_json && is_auto_get_config=1
+            # read -r loop rather than readarray: bash 3.2 ships on some hosts and has
+            # neither readarray nor mapfile (tests/argv-quoting.sh states the same
+            # constraint). The <<<"$(...)" form it replaces yielded one empty element
+            # for no output; this yields none. Expansions below therefore use the
+            # ${a[@]+"${a[@]}"} form, because bash 3.2 treats an empty array as unset
+            # under set -u and "${a[@]}" would abort instead of iterating zero times.
+            is_all_json=()
+            # limit max 233 lines for show.
+            while IFS= read -r is_ln; do is_all_json+=("$is_ln"); done \
+                < <(ls $is_conf_dir | grep -E -i "$is_file_str" | sed '/dynamic-port-.*-link/d' | head -233)
+            [[ ${#is_all_json[@]} -eq 0 ]] && err "无法找到相关的配置文件: ${2-}"
+            [[ ${#is_all_json[@]} -eq 1 ]] && is_config_file=${is_all_json[0]} && is_auto_get_config=1
         fi
         [[ ! $is_config_file ]] && {
             [[ $is_dont_auto_exit ]] && return
@@ -2107,9 +2116,18 @@ cmd_json_list() {
     is_json_out=1
     local filter="$1"
     [[ ! $filter ]] && filter='\.json$'
-    local files=() nodes=() f out
-    [[ -d $is_conf_dir ]] && readarray -t files <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -E -i "$filter" | sed '/dynamic-port-.*-link/d')"
-    for f in "${files[@]}"; do
+    local files=() nodes=() f out is_ln
+    # read -r loop rather than readarray: bash 3.2 ships on some hosts and has
+    # neither readarray nor mapfile (tests/argv-quoting.sh states the same
+    # constraint). The <<<"$(...)" form it replaces yielded one empty element
+    # for no output; this yields none. Expansions below therefore use the
+    # ${a[@]+"${a[@]}"} form, because bash 3.2 treats an empty array as unset
+    # under set -u and "${a[@]}" would abort instead of iterating zero times.
+    if [[ -d $is_conf_dir ]]; then
+        while IFS= read -r is_ln; do files+=("$is_ln"); done \
+            < <(ls "$is_conf_dir" 2>/dev/null | grep -E -i "$filter" | sed '/dynamic-port-.*-link/d')
+    fi
+    for f in ${files[@]+"${files[@]}"}; do
         [[ ! $f ]] && continue
         # isolate each node in a subshell so per-file var pollution can't leak
         out="$(
@@ -2143,8 +2161,11 @@ cmd_json_inspect() {
         info "$is_config_file" >/dev/null 2>&1
         printf '{"ok":true,"line":%s}\n' "$(line_json_obj)"
     else
-        [[ -d $is_conf_dir ]] && readarray -t files <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -E -i '\.json$' | sed '/dynamic-port-.*-link/d')"
-        for f in "${files[@]}"; do
+        if [[ -d $is_conf_dir ]]; then
+            while IFS= read -r is_ln; do files+=("$is_ln"); done \
+                < <(ls "$is_conf_dir" 2>/dev/null | grep -E -i '\.json$' | sed '/dynamic-port-.*-link/d')
+        fi
+        for f in ${files[@]+"${files[@]}"}; do
             [[ ! $f ]] && continue
             out="$(
                 is_config_file="$f"
@@ -2191,7 +2212,7 @@ cmd_json_info() {
 
 json_resolve_config_file() {
     local name="$1"
-    local matches=() cleaned=() f exact=
+    local matches=() cleaned=() f exact= is_ln
     [[ ! $name ]] && json_err "missing_name" "line name is required" 2
     [[ $name == "${name##*/}" && $name != "." && $name != ".." && $name != *$'\n'* && $name != *$'\r'* ]] \
         || json_err "invalid_name" "line name must be a basename" 2
@@ -2203,9 +2224,16 @@ json_resolve_config_file() {
     if [[ $exact ]]; then
         matches=("$exact")
     elif [[ -d $is_conf_dir ]]; then
-        readarray -t matches <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -F -i -- "$name" | sed '/dynamic-port-.*-link/d')"
+        # read -r loop rather than readarray: bash 3.2 ships on some hosts and has
+        # neither readarray nor mapfile (tests/argv-quoting.sh states the same
+        # constraint). The <<<"$(...)" form it replaces yielded one empty element
+        # for no output; this yields none. Expansions below therefore use the
+        # ${a[@]+"${a[@]}"} form, because bash 3.2 treats an empty array as unset
+        # under set -u and "${a[@]}" would abort instead of iterating zero times.
+        while IFS= read -r is_ln; do matches+=("$is_ln"); done \
+            < <(ls "$is_conf_dir" 2>/dev/null | grep -F -i -- "$name" | sed '/dynamic-port-.*-link/d')
     fi
-    for f in "${matches[@]}"; do
+    for f in ${matches[@]+"${matches[@]}"}; do
         [[ $f == "${f##*/}" && $f == *.json ]] && cleaned+=("$f")
     done
     [[ ${#cleaned[@]} -eq 0 ]] && json_err "not_found" "no line matches: $name" 2
@@ -2778,9 +2806,18 @@ cmd_json_conncheck() {
 # sub -> {ok,count,plain,base64}  aggregate every node's share link (the missing aggregator)
 cmd_json_sub() {
     is_json_out=1
-    local files=() urls=() f u
-    [[ -d $is_conf_dir ]] && readarray -t files <<<"$(ls "$is_conf_dir" 2>/dev/null | grep -E -i '\.json$' | sed '/dynamic-port-.*-link/d')"
-    for f in "${files[@]}"; do
+    local files=() urls=() f u is_ln
+    # read -r loop rather than readarray: bash 3.2 ships on some hosts and has
+    # neither readarray nor mapfile (tests/argv-quoting.sh states the same
+    # constraint). The <<<"$(...)" form it replaces yielded one empty element
+    # for no output; this yields none. Expansions below therefore use the
+    # ${a[@]+"${a[@]}"} form, because bash 3.2 treats an empty array as unset
+    # under set -u and "${a[@]}" would abort instead of iterating zero times.
+    if [[ -d $is_conf_dir ]]; then
+        while IFS= read -r is_ln; do files+=("$is_ln"); done \
+            < <(ls "$is_conf_dir" 2>/dev/null | grep -E -i '\.json$' | sed '/dynamic-port-.*-link/d')
+    fi
+    for f in ${files[@]+"${files[@]}"}; do
         [[ ! $f ]] && continue
         u="$(is_dont_show_info=1; is_dont_test_host=1; info "$f" >/dev/null 2>&1; printf '%s' "$is_url")"
         [[ $u ]] && urls+=("$u")
