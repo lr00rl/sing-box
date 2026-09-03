@@ -88,6 +88,46 @@ chk "node_uuid survives alongside the new key" "$(jq -r '.metadata.node_uuid' <<
 chk "inbound_tags is present with them" \
     "$(tags_of <<<"$out")" '["Hysteria2-17892.json"]'
 
+# --- 6. how many credentials sing-box can count on their own ----------------
+# The stats allowlist matches users by NAME, so an unnamed credential has no
+# per-user counter and its traffic stays inside the inbound total forever. That
+# is a permanent property of the config, and a control plane that cannot see it
+# reports "no user" for a line that never could have had one.
+lattice_meta_obj_for() { printf '{}\n'; }
+naming() { jq -r '"\(.metadata.named_users // "-")/\(.metadata.unnamed_users // "-")"'; }
+
+is_config_name=unnamed-only.json
+cat >"$is_conf_dir/$is_config_name" <<'EOF'
+{"inbounds":[{"tag":"unnamed-only.json","type":"vless","listen_port":1,
+"users":[{"uuid":"11111111-1111-4111-8111-111111111111"}]}]}
+EOF
+chk "a lone unnamed credential is reported as such" "$(json_node_obj | naming)" "0/1"
+
+is_config_name=mixed.json
+cat >"$is_conf_dir/$is_config_name" <<'EOF'
+{"inbounds":[{"tag":"mixed.json","type":"vless","listen_port":2,
+"users":[{"name":"u_1111111111111111","uuid":"11111111-1111-4111-8111-111111111111"},
+         {"uuid":"22222222-2222-4222-8222-222222222222"},
+         {"name":"","uuid":"33333333-3333-4333-8333-333333333333"}]}]}
+EOF
+chk "an empty name counts as unnamed, like the allowlist treats it"     "$(json_node_obj | naming)" "1/2"
+
+# Counted across every inbound in the file, unlike user_count, which is the
+# first inbound alone. A relay pair is exactly where those two differ.
+is_config_name=pair.json
+cat >"$is_conf_dir/$is_config_name" <<'EOF'
+{"inbounds":[
+  {"tag":"in-a","type":"vless","listen_port":3,"users":[{"name":"u_1111111111111111","uuid":"11111111-1111-4111-8111-111111111111"}]},
+  {"tag":"in-b","type":"hysteria2","listen_port":4,"users":[{"password":"pw1"},{"password":"pw2"}]}]}
+EOF
+out=$(json_node_obj)
+chk "both inbounds are counted, not just the first" "$(naming <<<"$out")" "1/2"
+chk "user_count still reports the first inbound alone" "$(jq -r .user_count <<<"$out")" "1"
+
+is_config_name=nousers.json
+printf '%s\n' '{"inbounds":[{"tag":"nousers.json","type":"vless","listen_port":5}]}' >"$is_conf_dir/$is_config_name"
+chk "a file with no credentials reports neither count" "$(json_node_obj | naming)" "-/-"
+
 echo "---"
 echo "passed $PASS, failed $FAIL"
 [ "$FAIL" -eq 0 ]
