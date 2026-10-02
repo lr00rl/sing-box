@@ -297,7 +297,9 @@ sb --json caps
   重复暂停或恢复不报错，结果里写明 `already_parked`、`already_active` 或 `absent`；什么都没变时不重启。
   暂停副本与线路上同名条目不一致时报 `conflict`，由人处理。
 - 删除用户（按名字或按凭据）会一并删掉它的暂停副本，避免已撤销的用户被 `unpark` 带回来；
-  `add` 会丢弃同名的暂停副本。
+  `add` 会丢弃同名的暂停副本。暂停副本删不掉时（例如磁盘写满），`del` 照样先从线路上撤销并重启，
+  但返回 `ok:false`、`error:"parked_stale"`、退出码 1，调用方应当重试，重试会补删暂停副本。
+  `add` 遇到同样情况仍然成功，只带 `parked_stale:true`：留下的是这个用户的旧凭据，`unpark` 会以 `conflict` 拒绝它。
 - socks、http、mixed 线路没有用户时，上游 sing-box 不做任何认证，谁都能用。`del` 和 `park`
   拒绝删掉或暂停这类线路的最后一个用户（`last_user_open_proxy`）。
 - `user parked` 和 `list` 的线路 metadata（`parked_users`、`parked_names`，均为字符串）报告暂停中的用户。

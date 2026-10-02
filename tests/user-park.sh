@@ -323,6 +323,36 @@ out=$(sb_user add park-e.json '{"name":"u_1111111111111111","uuid":"66666666-666
 chk "an add supersedes the parked copy of that name" "$(parked_of park-e.json)" "none"
 chk "and reports it" "$(jq -c '[.parked_count_before,.parked_count_after]' <<<"$out")" "[1,0]"
 
+# A del whose parked copy cannot be removed is not done: that copy is the
+# revoked credential waiting for an unpark. The call fails so the caller
+# repeats it, and the repeat finishes the job.
+line park-f.json vless "[$OWNER,$U1]"
+out=$(sb_user park park-f.json '{"name":"u_1111111111111111"}')
+out=$(json_parked_write() { return 1; }; sb_user del park-f.json '{"name":"u_1111111111111111"}'); rc=$?
+chk "a by-name del that leaves the parked copy fails" "$rc/$(jq -c '[.ok,.error,.parked_stale]' <<<"$out")" '1/[false,"parked_stale",true]'
+chk "the copy is still there" "$(parked_of park-f.json)" "[$U1]"
+out=$(sb_user del park-f.json '{"name":"u_1111111111111111"}'); rc=$?
+chk "repeating the del removes it" "$rc/$(parked_of park-f.json)" "0/none"
+# The same with the user active as well, which a half-finished unpark leaves.
+line park-f.json vless "[$OWNER,$U1]"
+mkdir -p "$PARKED"
+printf '{"schema":"lattice.singbox-parked.v1","users":[{"user":%s,"parked_at":"2026-10-01T00:00:00Z"}]}\n' "$U1" >"$PARKED/park-f.json"
+: >"$RESTARTS"
+out=$(json_parked_write() { return 1; }; sb_user del park-f.json "$U1"); rc=$?
+chk "a credential del that leaves the parked copy fails too" "$rc/$(jq -r .error <<<"$out")" "1/parked_stale"
+chk "after revoking on the line and restarting" "$(users_of park-f.json)/$(restarts)" "[$OWNER]/1"
+out=$(sb_user del park-f.json "$U1"); rc=$?
+chk "and a repeat removes the copy" "$rc/$(parked_of park-f.json)" "0/none"
+# An add that cannot drop a superseded copy still succeeds: unpark refuses that
+# copy as a conflict, so it cannot bring the old credential back.
+line park-f.json vless "[$OWNER,$U1]"
+out=$(sb_user park park-f.json '{"name":"u_1111111111111111"}')
+out=$(json_parked_write() { return 1; }; sb_user add park-f.json '{"name":"u_1111111111111111","uuid":"66666666-6666-4666-8666-0000000000bb"}'); rc=$?
+chk "an add that leaves a stale copy still succeeds" "$rc/$(jq -c '[.ok,.parked_stale]' <<<"$out")" "0/[true,true]"
+out=$(sb_user unpark park-f.json '{"name":"u_1111111111111111"}'); rc=$?
+chk "and unpark refuses that copy" "$(jq -r .error <<<"$out")" "conflict"
+rm -f "$PARKED/park-f.json"
+
 # Payload shapes.
 out=$(sb_user park park-e.json '[]'); chk "an empty batch is refused" "$(jq -r .error <<<"$out")" "invalid_payload"
 out=$(sb_user park park-e.json '["u_1"]'); chk "a batch of strings is refused" "$(jq -r .error <<<"$out")" "invalid_payload"

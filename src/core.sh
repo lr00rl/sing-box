@@ -2695,6 +2695,20 @@ cmd_json_user() {
     # the call took entries that were not the caller's, which the counts let
     # a control plane see after the fact. Parked counts appear only when the
     # line has or had parked users.
+    #
+    # A del is a revocation, and a parked copy of the user is the same
+    # credential waiting for an unpark. When that copy could not be removed the
+    # del is not done, so the call fails (parked_stale, exit 1) even though the
+    # line no longer serves the user and the core has restarted: a caller that
+    # took ok:true would drop its record of the user and leave the copy for the
+    # next unpark to bring back. Repeating the del finds the user gone from the
+    # line and retries the purge. add keeps ok:true with parked_stale: its stale
+    # copy is an older credential of a user who is active again, which unpark
+    # refuses as a conflict rather than restore. A damaged parked file
+    # (parked_invalid) also stays ok:true, since no repeat can fix it and unpark
+    # refuses that file outright; `user parked` and list metadata report it.
+    local fail=false
+    [[ $op == del && $parked_stale ]] && fail=true
     jq -nc --arg action "$op" --arg line "$config_file" --argjson before "$count_before" --argjson after "$count_after" \
         --argjson pbefore "$pcount_before" --argjson pafter "$pcount_after" \
         --argjson stale "$([ "$stats_sync" = stale ] && echo true || echo false)" \
@@ -2702,13 +2716,17 @@ cmd_json_user() {
         --argjson pinvalid "$([ "$parked_invalid" ] && echo true || echo false)" \
         --argjson by_name "$([ "$by_name" ] && echo true || echo false)" \
         --argjson changed "$([ "$users_changed" = true ] || [ "$pcount_after" != "$pcount_before" ] && echo true || echo false)" \
+        --argjson fail "$fail" \
         '{ok:true,action:$action,line:$line,user_count_before:$before,user_count_after:$after,
           matched:(if $action == "add" then $before - $after + 1 else $before - $after end)}
          + (if $by_name then {match:"name",changed:$changed} else {} end)
          + (if $pbefore > 0 or $pafter > 0 then {parked_count_before:$pbefore,parked_count_after:$pafter} else {} end)
          + (if $stale then {stats_allowlist_stale:true} else {} end)
          + (if $pstale then {parked_stale:true} else {} end)
-         + (if $pinvalid then {parked_invalid:true} else {} end)'
+         + (if $pinvalid then {parked_invalid:true} else {} end)
+         + (if $fail then {ok:false,error:"parked_stale",
+              message:"the line no longer serves this user, but its parked copy could not be removed; repeat the del"} else {} end)'
+    [[ $fail == true ]] && exit 1
     exit 0
 }
 
