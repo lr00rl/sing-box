@@ -668,6 +668,8 @@ create() {
             msg
             return
         }
+        # A rename keeps the line's parked users under its new name.
+        [[ $is_config_file ]] && json_parked_rename "$is_config_file" "$is_config_name"
         # del old file
         [[ $is_config_file ]] && is_no_del_msg=1 && del $is_config_file
         # save json to file
@@ -1009,6 +1011,9 @@ del() {
         # drop the Lattice sidecar entry only on a standalone delete; create()'s
         # internal rewrite (is_new_json set) handles rename cleanup itself.
         [[ ! $is_new_json ]] && lattice_meta_del_line "$is_config_file"
+        # Its parked users go with it: a credential for a line that no longer
+        # exists has nothing left to protect and would sit on disk forever.
+        [[ ! $is_new_json ]] && rm -f "$(json_parked_file "$is_config_file")"
         # Drop the deleted line's tags and users from the stats allowlist, so a
         # stale name cannot be reused by a later line and inherit its counter.
         [[ ! $is_new_json ]] && { json_stats_allowlist_sync || warn "stats 计数白名单更新失败, 已删除线路的条目仍在名单内."; }
@@ -2331,10 +2336,12 @@ json_line_user_select_defs='
 # parked list, one result per selector, and an {error,message} that refuses the
 # whole call. A selector that names more than one entry is an error, never a
 # guess, because the caller cannot see the line and an over-match here removes
-# someone else's access.
+# someone else's access. Ops: park, unpark, del (by name), and purge, which only
+# drops the parked copies a selector names.
 json_line_user_plan() {
     local op="$1" raw_file="$2" parked="$3" sels="$4"
-    jq -c --arg op "$op" --argjson parked "$parked" --argjson sels "$sels" "$json_line_user_select_defs"'
+    jq -c --arg op "$op" --argjson parked "$parked" --argjson sels "$sels" \
+        --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$json_line_user_select_defs"'
         (.inbounds[0].type // "") as $type
         | def hits($list; $s): [range(0; $list | length) as $j | select($list[$j] | selects($s; $type)) | $j];
           def drop($idx): [range(0; length) as $j | select(any($idx[]; . == $j) | not) | .[$j]];
@@ -2348,13 +2355,53 @@ json_line_user_plan() {
                    | hits(.users; $s) as $a
                    | hits(.parked | map(.user); $s) as $p
                    | result_for($i; $s) as $r
-                   | if $op == "del" then
+                   | if $op == "park" then
+                         if ($a | length) > 1 then
+                             .error = {error:"ambiguous_user", message:"selector \($i) matches \($a | length) users on this line"}
+                         elif ($a | length) == 1 then
+                             .users[$a[0]] as $u
+                             | if ($p | length) == 0 then
+                                   .parked += [{user:$u, parked_at:$now}] | .users |= drop($a)
+                                   | .results += [$r + {state:"parked"}]
+                               elif ($p | length) == 1 and .parked[$p[0]].user == $u then
+                                   .users |= drop($a) | .results += [$r + {state:"parked"}]
+                               else
+                                   .error = {error:"conflict", message:"selector \($i): this line already has a different parked copy of that user; resolve it by hand"}
+                               end
+                         elif ($p | length) > 0 then
+                             .results += [$r + {state:"already_parked"}]
+                         else
+                             .results += [$r + {state:"absent"}]
+                         end
+                     elif $op == "unpark" then
+                         if ($p | length) > 1 then
+                             .error = {error:"ambiguous_user", message:"selector \($i) matches \($p | length) parked users on this line"}
+                         elif ($p | length) == 1 then
+                             .parked[$p[0]].user as $u
+                             | if ($a | length) == 0 then
+                                   .users += [$u] | .parked |= drop($p)
+                                   | .results += [$r + {state:"restored"}]
+                               elif ($a | length) == 1 and .users[$a[0]] == $u then
+                                   .parked |= drop($p) | .results += [$r + {state:"already_active"}]
+                               elif ($a | length) == 1 then
+                                   .error = {error:"conflict", message:"selector \($i): the line holds a different entry for that user; resolve it by hand"}
+                               else
+                                   .error = {error:"ambiguous_user", message:"selector \($i) matches \($a | length) users on this line"}
+                               end
+                         elif ($a | length) > 0 then
+                             .results += [$r + {state:"already_active"}]
+                         else
+                             .results += [$r + {state:"absent"}]
+                         end
+                     elif $op == "del" then
                          if ($a | length) > 1 then
                              .error = {error:"ambiguous_user", message:"the name matches \($a | length) users on this line; remove it by credential instead"}
                          else
                              .users |= drop($a) | .parked |= drop($p)
                              | .results += [$r + {state:(if ($a | length) == 1 then "removed" elif ($p | length) > 0 then "removed_parked" else "absent" end)}]
                          end
+                     elif $op == "purge" then
+                         .parked |= drop($p)
                      else
                          .error = {error:"invalid_action", message:"no plan for \($op)"}
                      end
@@ -2412,16 +2459,88 @@ json_line_user_opens_proxy() {
     [[ $type == socks || $type == http || $type == mixed ]]
 }
 
+# ------------- parked line users -------------
+# A parked user is one taken off a line without losing its credential: `sb user
+# park` moves the exact user object out of conf/<line> into
+# lattice-parked/<line>, and `sb user unpark` moves it back. The parked file
+# sits outside conf/ because sing-box loads every conf/*.json and fails on a
+# document that is not a config. Shape:
+#   {schema:"lattice.singbox-parked.v1", users:[{user:{...}, parked_at:"<UTC>"}]}
+
+# Path of a line's parked file. Falls back to a sibling of conf/ so callers that
+# only set is_conf_dir (the test harnesses) get the same layout as a node.
+json_parked_file() {
+    printf '%s/%s' "${is_lattice_parked_dir:-${is_conf_dir%/*}/lattice-parked}" "$1"
+}
+
+# Print a line's parked document, or an empty one when the line has none.
+# Returns non-zero, printing nothing, when the file exists but is not a parked
+# document, so no caller can mistake a damaged file for an empty one and
+# overwrite the credentials in it.
+json_parked_read() {
+    local f
+    f=$(json_parked_file "$1")
+    if [[ ! -e $f ]]; then
+        printf '%s\n' '{"schema":"lattice.singbox-parked.v1","users":[]}'
+        return 0
+    fi
+    jq -ce 'if .schema == "lattice.singbox-parked.v1" and (.users | type) == "array"
+               and all(.users[]; type == "object" and (.user | type) == "object")
+            then . else empty end' "$f" 2>/dev/null
+}
+
+# Replace a line's parked document. Written to a temp file in the same
+# directory and renamed into place, so a crash leaves the old file or the new
+# one, never half of either. A document with no users removes the file.
+json_parked_write() {
+    local line="$1" doc="$2" f dir tmp
+    f=$(json_parked_file "$line")
+    dir=${f%/*}
+    if [[ $(jq '.users | length' <<<"$doc" 2>/dev/null) == 0 ]]; then
+        rm -f "$f"
+        return
+    fi
+    mkdir -p "$dir" && chmod 700 "$dir" || return 1
+    tmp=$(mktemp "$dir/.$line.XXXXXX") || return 1
+    chmod 600 "$tmp"
+    if ! jq . <<<"$doc" >"$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+    mv "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+}
+
+# A line renamed by `change` keeps its parked users under the new name. When
+# the new name already has parked users (a line that existed under it), the old
+# file stays where it is rather than overwrite them, and the caller is warned.
+json_parked_rename() {
+    local from to
+    from=$(json_parked_file "$1")
+    to=$(json_parked_file "$2")
+    [[ $1 != "$2" && -e $from ]] || return 0
+    if [[ -e $to ]]; then
+        warn "线路 $2 已有暂停的用户, $1 的暂停用户保留在 $from"
+        return 0
+    fi
+    mv "$from" "$to"
+}
+
 # user add|del <line> <payload-json> -> mutate one inbound's user list.
+# user park|unpark <line> <payload-json|array> -> see cmd_json_user_park.
 cmd_json_user() {
     is_json_out=1
     local op="$1" name="$2" payload="$3"
-    [[ $op == "add" || $op == "del" ]] || json_err "invalid_action" "user action must be add or del" 2
+    case $op in
+    add | del) ;;
+    park | unpark) cmd_json_user_park "$op" "$name" "$payload" ;;
+    *) json_err "invalid_action" "user action must be add, del, park or unpark" 2 ;;
+    esac
     [[ $payload ]] || json_err "missing_payload" "user payload json is required" 2
     jq -e . >/dev/null <<<"$payload" || json_err "invalid_payload" "user payload must be valid json" 2
 
     local config_file resolve_out resolve_rc raw_file user_json filter count_before count_after stats_sync=ok
-    local by_name= plan plan_error write_arg changed=true
+    local by_name= plan plan_error write_arg users_changed=true
+    local parked_before parked_after= parked_invalid= parked_stale= pcount_before=0 pcount_after=0
     resolve_out=$(json_resolve_config_file "$name")
     resolve_rc=$?
     if [[ $resolve_rc != 0 ]]; then
@@ -2443,15 +2562,24 @@ cmd_json_user() {
         by_name=1
     fi
     write_arg=$user_json
+    # A damaged parked file is reported and left alone: add and del still do
+    # their job on the line, which for del is the revocation that matters.
+    if ! parked_before=$(json_parked_read "$config_file"); then
+        parked_invalid=1
+        parked_before='{"schema":"lattice.singbox-parked.v1","users":[]}'
+    fi
+    pcount_before=$(jq '.users | length' <<<"$parked_before")
+    pcount_after=$pcount_before
 
     count_before=$(jq '(.inbounds[0].users // []) | length' "$raw_file" 2>/dev/null)
     [[ $count_before =~ ^[0-9]+$ ]] || count_before=0
     if [[ $by_name ]]; then
-        plan=$(json_line_user_plan del "$raw_file" '{"users":[]}' "[$user_json]") || json_err "jq_failed" "failed to plan the removal" 2
+        plan=$(json_line_user_plan del "$raw_file" "$parked_before" "[$user_json]") || json_err "jq_failed" "failed to plan the removal" 2
         plan_error=$(jq -c '.error // empty' <<<"$plan")
         [[ $plan_error ]] && json_err "$(jq -r .error <<<"$plan_error")" "$(jq -r .message <<<"$plan_error")" 2
         write_arg=$(jq -c .users <<<"$plan")
-        [[ $write_arg == "$(jq -c '.inbounds[0].users // []' "$raw_file")" ]] && changed=false
+        [[ $write_arg == "$(jq -c '.inbounds[0].users // []' "$raw_file")" ]] && users_changed=false
+        parked_after=$(jq -c --argjson doc "$parked_before" '$doc + {users:.parked}' <<<"$plan")
         filter='.inbounds[0].users = $user'
     elif [[ $op == "add" ]]; then
         filter='
@@ -2470,11 +2598,28 @@ cmd_json_user() {
     # A by-name removal of a user the line does not hold changes nothing, and
     # restarting would drop every connection on the node for no reason. Every
     # other call keeps its old shape: write, sync, restart.
-    if [[ $changed == true ]]; then
+    if [[ $users_changed == true ]]; then
         json_write_config_atomically "$raw_file" "$filter" "$write_arg"
     fi
     count_after=$(jq '(.inbounds[0].users // []) | length' "$raw_file" 2>/dev/null)
     [[ $count_after =~ ^[0-9]+$ ]] || count_after=0
+    # Parked copies of the same user. del takes them as well, or a revoked user
+    # would come back on the next unpark. add drops the copy it supersedes, so
+    # the line never holds an active and a parked entry for one name. A credential
+    # del matches parked copies with the same selector rule as park (the name
+    # when there is one), and an add without a name leaves them alone.
+    if [[ ! $parked_invalid && $pcount_before -gt 0 && ! $parked_after ]]; then
+        if [[ $op == "del" ]] || jq -e '[.name, .username] | any(type == "string" and . != "")' >/dev/null 2>&1 <<<"$user_json"; then
+            plan=$(json_line_user_plan purge "$raw_file" "$parked_before" "[$user_json]") &&
+                parked_after=$(jq -c --argjson doc "$parked_before" '$doc + {users:.parked}' <<<"$plan")
+        fi
+    fi
+    if [[ ! $parked_invalid && $parked_after ]]; then
+        pcount_after=$(jq '.users | length' <<<"$parked_after")
+        if [[ $pcount_after != "$pcount_before" ]]; then
+            json_parked_write "$config_file" "$parked_after" || { parked_stale=1; pcount_after=$pcount_before; }
+        fi
+    fi
     # Before the restart, so the new user list and the counter allowlist reach
     # the core together and a user add costs one restart, not two.
     #
@@ -2484,21 +2629,137 @@ cmd_json_user() {
     # counters are the smaller problem by a wide margin, so warn and carry on;
     # the caller learns about it from stats_allowlist_stale in the result.
     stats_sync=ok
-    if [[ $changed == true ]]; then
+    if [[ $users_changed == true ]]; then
         json_stats_allowlist_sync || stats_sync=stale
         manage restart "$is_core" >/dev/null 2>&1 || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
     fi
     # matched is how many entries the payload hit: del removes every one of
     # them, add replaces every one and appends its own. More than one means
     # the call took entries that were not the caller's, which the counts let
-    # a control plane see after the fact.
+    # a control plane see after the fact. Parked counts appear only when the
+    # line has or had parked users.
     jq -nc --arg action "$op" --arg line "$config_file" --argjson before "$count_before" --argjson after "$count_after" \
+        --argjson pbefore "$pcount_before" --argjson pafter "$pcount_after" \
         --argjson stale "$([ "$stats_sync" = stale ] && echo true || echo false)" \
-        --argjson by_name "$([ "$by_name" ] && echo true || echo false)" --argjson changed "$changed" \
+        --argjson pstale "$([ "$parked_stale" ] && echo true || echo false)" \
+        --argjson pinvalid "$([ "$parked_invalid" ] && echo true || echo false)" \
+        --argjson by_name "$([ "$by_name" ] && echo true || echo false)" \
+        --argjson changed "$([ "$users_changed" = true ] || [ "$pcount_after" != "$pcount_before" ] && echo true || echo false)" \
         '{ok:true,action:$action,line:$line,user_count_before:$before,user_count_after:$after,
           matched:(if $action == "add" then $before - $after + 1 else $before - $after end)}
          + (if $by_name then {match:"name",changed:$changed} else {} end)
-         + (if $stale then {stats_allowlist_stale:true} else {} end)'
+         + (if $pbefore > 0 or $pafter > 0 then {parked_count_before:$pbefore,parked_count_after:$pafter} else {} end)
+         + (if $stale then {stats_allowlist_stale:true} else {} end)
+         + (if $pstale then {parked_stale:true} else {} end)
+         + (if $pinvalid then {parked_invalid:true} else {} end)'
+    exit 0
+}
+
+# user park|unpark <line> <json|json-array> -> take users off a line without
+# losing their credentials, or put them back.
+#
+# park moves each selected user object, unchanged, from conf/<line> to the
+# line's parked file; unpark moves it back. A selector is shaped like an add
+# payload and matched by the rule in json_line_user_select_defs: by user name
+# when it has one, else by credential, and it must pick out at most one entry.
+# One call takes a selector or an array of them and costs at most one restart,
+# so suspending ten users on a node drops its connections once, not ten times.
+# Both verbs are idempotent: parking a parked user, or unparking an active one,
+# is a result rather than an error, and a call that changes nothing does not
+# restart. A parked copy that differs from the active entry of the same user is
+# a conflict the caller resolves by hand; neither verb picks a winner.
+#
+# Each move writes the destination before it removes the source, so at every
+# moment the credential is in at least one of the two files. park writes the
+# parked file first and restores it if the core rejects the new conf. unpark
+# writes the conf first; if removing the parked copy then fails, the copy stays
+# (parked_stale), and the next unpark finds an identical active entry and drops
+# it.
+cmd_json_user_park() {
+    local op="$1" name="$2" payload="$3"
+    local resolve_out resolve_rc config_file raw_file sel sels='[]' parked_before parked_after plan plan_error
+    local users_before users_after count_before count_after pcount_before pcount_after
+    local users_changed=false parked_changed=false parked_stale= out rc stats_sync=ok
+    [[ $payload ]] || json_err "missing_payload" "user payload json is required" 2
+    jq -e 'type == "object" or (type == "array" and length > 0 and all(.[]; type == "object"))' >/dev/null 2>&1 <<<"$payload" ||
+        json_err "invalid_payload" "user payload must be a json object or a non-empty array of objects" 2
+    resolve_out=$(json_resolve_config_file "$name")
+    resolve_rc=$?
+    if [[ $resolve_rc != 0 ]]; then
+        printf '%s\n' "$resolve_out"
+        exit "$resolve_rc"
+    fi
+    config_file="$resolve_out"
+    raw_file="$is_conf_dir/$config_file"
+    [[ -f $raw_file ]] || json_err "not_found" "config file not found: $config_file" 2
+    while IFS= read -r sel; do
+        sel=$(json_line_user_obj "$raw_file" "$sel") || json_err "payload_failed" "failed to derive sing-box user object" 2
+        [[ $sel != "null" && $sel ]] || json_err "unsupported_protocol" "this line protocol does not support dashboard user mutation" 2
+        jq -e '[.name, .username, .uuid, .password] | any(type == "string" and . != "")' >/dev/null 2>&1 <<<"$sel" ||
+            json_err "invalid_user" "every selector needs a user name or a credential" 2
+        sels=$(jq -c --argjson s "$sel" '. + [$s]' <<<"$sels")
+    done <<<"$(jq -c 'if type == "array" then .[] else . end' <<<"$payload")"
+
+    parked_before=$(json_parked_read "$config_file") ||
+        json_err "parked_invalid" "the parked file for $config_file is not a parked-user document; refusing to touch it" 2
+    plan=$(json_line_user_plan "$op" "$raw_file" "$parked_before" "$sels") || json_err "jq_failed" "failed to plan the $op" 2
+    plan_error=$(jq -c '.error // empty' <<<"$plan")
+    [[ $plan_error ]] && json_err "$(jq -r .error <<<"$plan_error")" "$(jq -r .message <<<"$plan_error")" 2
+
+    users_before=$(jq -c '.inbounds[0].users // []' "$raw_file")
+    users_after=$(jq -c .users <<<"$plan")
+    parked_after=$(jq -c --argjson doc "$parked_before" '$doc + {users:.parked}' <<<"$plan")
+    count_before=$(jq length <<<"$users_before")
+    count_after=$(jq length <<<"$users_after")
+    pcount_before=$(jq '.users | length' <<<"$parked_before")
+    pcount_after=$(jq '.users | length' <<<"$parked_after")
+    [[ $users_after == "$users_before" ]] || users_changed=true
+    [[ $(jq -c .users <<<"$parked_after") == "$(jq -c .users <<<"$parked_before")" ]] || parked_changed=true
+    if [[ $op == "park" ]] && json_line_user_opens_proxy "$raw_file" "$count_before" "$count_after"; then
+        json_err "last_user_open_proxy" "parking the last user of a socks, http or mixed line would leave it open to anyone; add another user first" 2
+    fi
+
+    if [[ $op == "park" ]]; then
+        if [[ $parked_changed == true ]]; then
+            json_parked_write "$config_file" "$parked_after" || json_err "parked_write_failed" "cannot write the parked file for $config_file" 2
+        fi
+        if [[ $users_changed == true ]]; then
+            out=$(json_write_config_atomically "$raw_file" '.inbounds[0].users = $user' "$users_after")
+            rc=$?
+            if [[ $rc != 0 ]]; then
+                json_parked_write "$config_file" "$parked_before" || true
+                printf '%s\n' "$out"
+                exit "$rc"
+            fi
+        fi
+    else
+        if [[ $users_changed == true ]]; then
+            out=$(json_write_config_atomically "$raw_file" '.inbounds[0].users = $user' "$users_after")
+            rc=$?
+            [[ $rc == 0 ]] || { printf '%s\n' "$out"; exit "$rc"; }
+        fi
+        if [[ $parked_changed == true ]]; then
+            json_parked_write "$config_file" "$parked_after" || { parked_stale=1; pcount_after=$pcount_before; }
+        fi
+    fi
+    if [[ $users_changed == true ]]; then
+        json_stats_allowlist_sync || stats_sync=stale
+        manage restart "$is_core" >/dev/null 2>&1 || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
+    fi
+    jq -nc --arg action "$op" --arg line "$config_file" \
+        --argjson before "$count_before" --argjson after "$count_after" \
+        --argjson pbefore "$pcount_before" --argjson pafter "$pcount_after" \
+        --argjson changed "$([ "$users_changed" = true ] || [ "$parked_changed" = true ] && echo true || echo false)" \
+        --argjson restarted "$users_changed" \
+        --argjson results "$(jq -c .results <<<"$plan")" \
+        --argjson stale "$([ "$stats_sync" = stale ] && echo true || echo false)" \
+        --argjson pstale "$([ "$parked_stale" ] && echo true || echo false)" \
+        '{ok:true,action:$action,line:$line,changed:$changed,restarted:$restarted,
+          user_count_before:$before,user_count_after:$after,
+          matched:(if $action == "park" then $before - $after else $after - $before end),
+          parked_count_before:$pbefore,parked_count_after:$pafter,results:$results}
+         + (if $stale then {stats_allowlist_stale:true} else {} end)
+         + (if $pstale then {parked_stale:true} else {} end)'
     exit 0
 }
 
@@ -3003,6 +3264,8 @@ cmd_backup() {
     [[ -d $is_conf_dir ]] && items+=(conf)
     # Lattice node/line identity sidecar (design-09 §E.2), if present.
     [[ -f $is_lattice_meta ]] && items+=(lattice-metadata.json)
+    # Parked line users: without them a restore would lose every suspended user.
+    [[ -d $is_core_dir/lattice-parked ]] && items+=(lattice-parked)
     if [[ ${#items[@]} -eq 0 ]]; then
         [[ $is_json_out ]] && json_err "nothing_to_backup" "no sing-box config data under $is_core_dir" 2
         err "没有可备份的 $is_core_name 数据 ($is_core_dir)"
