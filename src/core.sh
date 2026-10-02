@@ -2278,7 +2278,10 @@ json_line_user_obj() {
           elif ($type == "trojan" or $type == "hysteria2" or $type == "anytls") then
             {name:($p.name // ""), password:($p.password // "")} | compact_obj
           elif ($type == "socks") then
-            {name:($p.name // ""), username:($p.username // $p.email // $p.user_id // ""), password:($p.password // "")} | compact_obj
+            # A socks user is a username and a password and nothing else:
+            # the core decodes it strictly and fails the whole file on
+            # "name". The username is the user name on these lines.
+            {username:($p.username // $p.email // $p.user_id // $p.name // ""), password:($p.password // "")} | compact_obj
           else
             null
           end

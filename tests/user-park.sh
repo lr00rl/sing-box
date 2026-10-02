@@ -83,6 +83,17 @@ json_line_user_opens_proxy "$is_conf_dir/vless-443.json" 1 0; chk "vless with no
 # Already empty means already open; refusing a no-op would not close it.
 json_line_user_opens_proxy "$is_conf_dir/http-8080.json" 0 0; chk "a line that was already empty is not this guard's case" "$?" "1"
 
+# --- 2. a socks user is written the way the core decodes it ------------------
+# sing-box v1.13.14 fails a socks file whose user carries "name"
+# (inbounds[0].users[0].name: json: unknown field "name"). Lattice sends a
+# name and the same value as the username, so the username carries it.
+out=$(sb_user add socks-1081.json '{"name":"u_0123456789abcdef","username":"u_0123456789abcdef","password":"pw-lattice"}'); rc=$?
+chk "a socks add with a name succeeds" "$rc" "0"
+chk "and writes no name field" "$(jq -c '.inbounds[0].users[-1]' "$is_conf_dir/socks-1081.json")" \
+    '{"username":"u_0123456789abcdef","password":"pw-lattice"}'
+out=$(sb_user add socks-1081.json '{"name":"u_1111111111111111","password":"pw-only-name"}'); rc=$?
+chk "a name with no username becomes the username" "$(jq -r '.inbounds[0].users[-1].username' "$is_conf_dir/socks-1081.json")" "u_1111111111111111"
+
 REACHED_END=1
 echo
 echo "PASS=$PASS FAIL=$FAIL"
