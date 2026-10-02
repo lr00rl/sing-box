@@ -56,6 +56,7 @@ eval "$(extract_fn cmd_json_meta)"
 eval "$(extract_fn json_edit_config_atomically)"
 eval "$(extract_fn json_write_config_atomically)"
 eval "$(extract_fn json_stats_allowlist_sync)"
+eval "$(extract_fn json_line_user_opens_proxy)"
 eval "$(extract_fn cmd_json_user)"
 eval "$(extract_fn cmd_json_stats)"
 is_config_json="$TMP/config.json"; is_core_bin=$(command -v true); is_core=sing-box

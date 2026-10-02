@@ -2337,6 +2337,23 @@ json_write_config_atomically() {
     rm -f "$errf" "$backup"
 }
 
+# Succeeds when taking a socks, http or mixed inbound from $2 users to $3 would
+# leave it with none, which opens it to anyone. Upstream builds these inbounds'
+# authenticator with auth.NewAuthenticator(options.Users) (sing-box v1.13.14
+# protocol/socks/inbound.go:49, protocol/http/inbound.go:43,
+# protocol/mixed/inbound.go:54), that returns nil for an empty list (sagernet/sing
+# v0.8.11 common/auth/auth.go:15-16), and every handshake skips authentication
+# when it is nil (protocol/socks/handshake.go:149 for socks4 and :189-192 for
+# socks5, which then offers AuthTypeNotRequired; protocol/http/handshake.go:36).
+# v1.13.19 with sing v0.8.13 is the same, and `sing-box check` accepts the empty
+# list, so nothing downstream of this script would stop it.
+json_line_user_opens_proxy() {
+    local raw_file="$1" before="$2" after="$3" type
+    [[ $before -gt 0 && $after -eq 0 ]] || return 1
+    type=$(jq -r '.inbounds[0].type // ""' "$raw_file" 2>/dev/null)
+    [[ $type == socks || $type == http || $type == mixed ]]
+}
+
 # user add|del <line> <payload-json> -> mutate one inbound's user list.
 cmd_json_user() {
     is_json_out=1
@@ -2369,6 +2386,11 @@ cmd_json_user() {
         filter='
             .inbounds[0].users = ((.inbounds[0].users // []) | map(select(('"$json_line_user_matches_filter"') | not)))
         '
+    fi
+    if [[ $op == "del" ]]; then
+        count_after=$(jq --argjson user "$user_json" "$filter"' | (.inbounds[0].users // []) | length' "$raw_file" 2>/dev/null)
+        json_line_user_opens_proxy "$raw_file" "$count_before" "${count_after:-0}" &&
+            json_err "last_user_open_proxy" "removing the last user of a socks, http or mixed line would leave it open to anyone; add another user first, or delete the line" 2
     fi
     json_write_config_atomically "$raw_file" "$filter" "$user_json"
     count_after=$(jq '(.inbounds[0].users // []) | length' "$raw_file" 2>/dev/null)
