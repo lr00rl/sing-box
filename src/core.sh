@@ -2582,6 +2582,17 @@ json_user_lock() {
 cmd_json_user() {
     is_json_out=1
     local op="$1" name="$2" payload="$3"
+    # Lattice's contract test runs a copy of this command built by extracting
+    # functions from this file. A helper left out of such a copy must fail the
+    # call, not vanish: bash prints "command not found" and carries on, so the
+    # open-proxy guard tests false, the lock is skipped, and every parked read
+    # looks damaged, all with ok:true.
+    declare -F json_resolve_config_file json_line_user_obj json_line_user_valid json_line_user_plan \
+        json_line_user_opens_proxy json_write_config_atomically json_stats_allowlist_sync \
+        json_parked_file json_parked_read json_parked_write json_parked_summary \
+        json_user_lock_available json_user_lock cmd_json_user_park cmd_json_user_parked >/dev/null &&
+        [[ ${json_line_user_matches_filter:-} && ${json_line_user_select_defs:-} ]] ||
+        json_err "script_incomplete" "this copy of the node script lacks functions that sb user calls" 2
     case $op in
     add | del) json_user_lock ;;
     park | unpark) json_user_lock; cmd_json_user_park "$op" "$name" "$payload" ;;

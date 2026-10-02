@@ -111,6 +111,13 @@ json_line_user_opens_proxy "$is_conf_dir/vless-443.json" 1 0; chk "vless with no
 # Already empty means already open; refusing a no-op would not close it.
 json_line_user_opens_proxy "$is_conf_dir/http-8080.json" 0 0; chk "a line that was already empty is not this guard's case" "$?" "1"
 
+# A copy of the command missing a helper refuses instead of skipping the guard.
+out=$(unset -f json_line_user_opens_proxy; sb_user del socks-1081.json '{"username":"owner","password":"pw-owner"}'); rc=$?
+chk "a copy without the guard refuses" "$rc/$(jq -r .error <<<"$out")" "2/script_incomplete"
+chk "and leaves the line alone" "$(users_of socks-1081.json)" '[{"username":"owner","password":"pw-owner"}]'
+out=$(unset json_line_user_select_defs; sb_user park socks-1081.json '{"name":"owner"}'); rc=$?
+chk "so does one without the selector rule" "$rc/$(jq -r .error <<<"$out")" "2/script_incomplete"
+
 # --- 2. a socks user is written the way the core decodes it ------------------
 # sing-box v1.13.14 fails a socks file whose user carries "name"
 # (inbounds[0].users[0].name: json: unknown field "name"). Lattice sends a
