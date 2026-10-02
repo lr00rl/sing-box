@@ -62,6 +62,8 @@ eval "$(extract_fn json_parked_read)"
 eval "$(extract_fn json_parked_write)"
 eval "$(extract_fn json_line_user_plan)"
 eval "$(awk "/^json_line_user_select_defs='/,/^'/" "$CORE")"
+eval "$(extract_fn json_user_lock_available)"
+eval "$(extract_fn json_user_lock)"
 eval "$(extract_fn cmd_json_user)"
 eval "$(extract_fn cmd_json_stats)"
 is_config_json="$TMP/config.json"; is_core_bin=$(command -v true); is_core=sing-box

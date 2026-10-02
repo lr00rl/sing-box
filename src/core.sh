@@ -2548,6 +2548,34 @@ json_parked_summary() {
            parked_names:[$n[] | select(type == "string" and test("^u_[0-9a-f]{16}$"))]}'
 }
 
+# ------------- one user change at a time -------------
+# Every user verb reads the conf and the parked file, plans, writes both, syncs
+# the counter allowlist in config.json and restarts the core. Two of them at
+# once would each write from what they read, and the later write would undo the
+# earlier one: a user just parked comes back on the line, and the parked file
+# loses it. The lock is per node, not per line, because config.json and the
+# restart are shared by every line.
+#
+# flock(1) holds the lock on an open descriptor, so the kernel drops it when the
+# call exits or is killed and a crash never leaves it stuck. A node without
+# flock (util-linux, or busybox's applet) runs unlocked, as every script before
+# this one did, and `caps` leaves out user-lock so a control plane can see that
+# it must keep its own calls to that node apart.
+json_user_lock_available() {
+    command -v flock >/dev/null 2>&1
+}
+
+# Takes the node's user lock on fd 8 for the rest of the process. It waits up to
+# is_lattice_user_lock_wait seconds (20 by default, inside the 30 s a Lattice
+# task gets), then refuses with busy, before reading or changing anything.
+json_user_lock() {
+    local lock="${is_lattice_user_lock:-${is_conf_dir%/*}/lattice-user.lock}"
+    json_user_lock_available || return 0
+    exec 8>>"$lock" || json_err "lock_failed" "cannot open the user lock $lock" 2
+    flock -w "${is_lattice_user_lock_wait:-20}" 8 ||
+        json_err "busy" "another sb user call on this node holds the user lock; nothing was changed, try again" 2
+}
+
 # user add|del <line> <payload-json> -> mutate one inbound's user list.
 # user park|unpark <line> <payload-json|array> -> see cmd_json_user_park.
 # user parked [line] -> see cmd_json_user_parked.
@@ -2555,8 +2583,8 @@ cmd_json_user() {
     is_json_out=1
     local op="$1" name="$2" payload="$3"
     case $op in
-    add | del) ;;
-    park | unpark) cmd_json_user_park "$op" "$name" "$payload" ;;
+    add | del) json_user_lock ;;
+    park | unpark) json_user_lock; cmd_json_user_park "$op" "$name" "$payload" ;;
     parked) cmd_json_user_parked "$name" ;;
     *) json_err "invalid_action" "user action must be add, del, park, unpark or parked" 2 ;;
     esac
@@ -2653,10 +2681,14 @@ cmd_json_user() {
     # that stays live on the running proxy until something restarts it. Stale
     # counters are the smaller problem by a wide margin, so warn and carry on;
     # the caller learns about it from stats_allowlist_stale in the result.
+    #
+    # The restart runs with fd 8, the user lock, closed: an init system that
+    # starts the core as a child of this call would otherwise hand it the lock,
+    # and every later user call would wait on the running proxy.
     stats_sync=ok
     if [[ $users_changed == true ]]; then
         json_stats_allowlist_sync || stats_sync=stale
-        manage restart "$is_core" >/dev/null 2>&1 || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
+        manage restart "$is_core" >/dev/null 2>&1 8>&- || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
     fi
     # matched is how many entries the payload hit: del removes every one of
     # them, add replaces every one and appends its own. More than one means
@@ -2769,7 +2801,7 @@ cmd_json_user_park() {
     fi
     if [[ $users_changed == true ]]; then
         json_stats_allowlist_sync || stats_sync=stale
-        manage restart "$is_core" >/dev/null 2>&1 || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
+        manage restart "$is_core" >/dev/null 2>&1 8>&- || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
     fi
     jq -nc --arg action "$op" --arg line "$config_file" \
         --argjson before "$count_before" --argjson after "$count_after" \
@@ -2826,10 +2858,14 @@ cmd_json_user_parked() {
 #   user-open-proxy-guard  del and park refuse to empty a socks/http/mixed line
 #   user-match-counts      user results carry matched
 #   user-socks-add         socks users are written without the name the core rejects
+#   user-lock              user add/del/park/unpark run one at a time on this node;
+#                          listed only when the node has flock, so without it the
+#                          caller keeps its own calls to the node apart
 cmd_json_caps() {
-    jq -nc --arg script "${is_sh_ver:-}" '{ok:true,script:$script,caps:[
+    jq -nc --arg script "${is_sh_ver:-}" \
+        --argjson lock "$(json_user_lock_available && echo true || echo false)" '{ok:true,script:$script,caps:([
         "user-del-by-name","user-park","user-parked-list",
-        "user-open-proxy-guard","user-match-counts","user-socks-add"]}'
+        "user-open-proxy-guard","user-match-counts","user-socks-add"] + (if $lock then ["user-lock"] else [] end))}'
     exit 0
 }
 

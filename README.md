@@ -302,6 +302,10 @@ sb --json caps
   拒绝删掉或暂停这类线路的最后一个用户（`last_user_open_proxy`）。
 - `user parked` 和 `list` 的线路 metadata（`parked_users`、`parked_names`，均为字符串）报告暂停中的用户。
   只列出 Lattice 自己的 `u_<16 位十六进制>` 名字，其他用户只计数；凭据从不输出。
+- `add`、`del`、`park`、`unpark` 在一台节点上一次只跑一个：先用 flock(1) 拿到
+  `/etc/sing-box/lattice-user.lock`，最多等 20 秒，拿不到就报 `busy`（退出码 2），什么都不读也不改。
+  锁挂在打开的文件描述符上，调用退出或被杀时由内核释放，不会留下死锁；重启 core 时不把这个描述符交给子进程。
+  节点上没有 flock 时照旧不加锁运行，`caps` 也不列出 `user-lock`，这时控制面要自己把对这台节点的调用错开。
 - `caps` 返回 `{ok,script,caps:[...]}`。旧脚本没有这个命令，会以 `ok:false` 回答，即不具备这些能力。
 
 ### Lattice 身份元数据 sidecar
@@ -346,6 +350,7 @@ sidecar 结构：
 - 节点连接地址 sidecar：`/etc/sing-box/conf/*.addr`
 - Lattice 身份元数据 sidecar：`/etc/sing-box/lattice-metadata.json`（在 `conf/` 之外，服务不解析）
 - 暂停中的线路用户：`/etc/sing-box/lattice-parked/<line>.json`（在 `conf/` 之外；目录 0700，文件 0600；`sb backup` 一并归档）
+- 线路用户锁：`/etc/sing-box/lattice-user.lock`（空文件，只供 flock 使用）
 - 日志目录：`/var/log/sing-box`
 - 命令入口：`/usr/local/bin/sing-box`、`/usr/local/bin/sb`
 - 备份目录：`/opt/lattice/.archive_backup/`

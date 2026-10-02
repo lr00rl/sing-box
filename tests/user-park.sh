@@ -37,12 +37,32 @@ is_core_bin=$(command -v true); is_core=sing-box; is_json_out=1
 json_err() { printf '{"ok":false,"error":"%s","message":"%s"}\n' "$1" "$2"; exit "${3:-1}"; }
 warn() { echo "warn: $*" >&2; }
 RESTARTS="$TMP/restarts"
-manage() { echo x >>"$RESTARTS"; }
+# Each restart also records whether the user lock's descriptor reached it.
+manage() {
+    if { true >&8; } 2>/dev/null; then echo fd8-open; else echo fd8-closed; fi >>"$RESTARTS.fd"
+    echo x >>"$RESTARTS"
+}
 restarts() { [ -f "$RESTARTS" ] && wc -l <"$RESTARTS" | tr -d ' ' || echo 0; }
+
+# flock(1) is util-linux and macOS has none. Stand in with perl's flock(2) on
+# the inherited descriptor: the lock belongs to the open file, so it outlives
+# perl and lasts while the shell holds fd 8, exactly as with the real command.
+if ! command -v flock >/dev/null 2>&1; then
+    flock() {
+        [ "$1" = -w ] || return 2
+        perl -MFcntl=:flock -e '
+            my ($wait, $fd) = @ARGV;
+            open(my $fh, ">>&=", $fd) or exit 2;
+            my $end = time + $wait;
+            until (flock($fh, LOCK_EX | LOCK_NB)) { exit 1 if time >= $end; select(undef, undef, undef, 0.05); }
+            exit 0;' "$2" "$3"
+    }
+fi
 
 for f in json_resolve_config_file json_line_user_obj json_line_user_valid \
     json_write_config_atomically json_stats_allowlist_sync json_line_user_opens_proxy json_line_user_plan \
     json_parked_file json_parked_read json_parked_write json_parked_rename json_parked_summary \
+    json_user_lock_available json_user_lock \
     cmd_json_user cmd_json_user_park cmd_json_user_parked json_node_obj cmd_json_caps; do
     eval "$(extract_fn $f)"
 done
@@ -369,8 +389,52 @@ rm -f "$PARKED/hub-a.json"
 out=$(is_sh_ver=v1.24.3-alpha.8; cmd_json_caps); rc=$?
 chk "caps answers" "$(jq -c '[.ok, .script]' <<<"$out")" '[true,"v1.24.3-alpha.8"]'
 chk "and names what this script does" "$(jq -c '.caps | sort' <<<"$out")" \
-    '["user-del-by-name","user-match-counts","user-open-proxy-guard","user-park","user-parked-list","user-socks-add"]'
+    '["user-del-by-name","user-lock","user-match-counts","user-open-proxy-guard","user-park","user-parked-list","user-socks-add"]'
+out=$(json_user_lock_available() { return 1; }; cmd_json_caps)
+chk "a node without flock does not claim the lock" "$(jq -c '.caps | index("user-lock")' <<<"$out")" "null"
 chk "the entry point routes caps" "$(awk '/^main\(\) \{/,/^\}/' "$CORE" | grep -A1 '^    caps)' | tail -1 | tr -d ' ')" "cmd_json_caps"
+
+# --- 7. one user change at a time --------------------------------------------
+# Two parks of different users on one line, each with a parked-file read slow
+# enough for the other call to read the same state meanwhile. Unlocked, the
+# later write is built from a list that still holds the other user, so that
+# user comes back on the line and drops out of the parked file.
+eval "slow_$(declare -f json_parked_read)"
+json_parked_read() { slow_json_parked_read "$@"; local rc=$?; sleep 1; return $rc; }
+line race-a.json vless "[$OWNER,$U1,$U2]"
+: >"$RESTARTS"
+sb_user park race-a.json '{"name":"u_1111111111111111"}' >"$TMP/race-1" &
+r1=$!
+sb_user park race-a.json '{"name":"u_2222222222222222"}' >"$TMP/race-2" &
+r2=$!
+wait $r1; rc1=$?
+wait $r2; rc2=$?
+eval "$(extract_fn json_parked_read)"
+chk "two parks at once both succeed" "$rc1/$rc2" "0/0"
+chk "neither user is left on the line" "$(users_of race-a.json)" "[$OWNER]"
+chk "both are parked" "$(jq -c '[.users[].user.name] | sort' "$PARKED/race-a.json")" \
+    '["u_1111111111111111","u_2222222222222222"]'
+chk "one restart each" "$(restarts)" "2"
+chk "no restart in this suite was handed the lock's descriptor" "$(sort -u "$RESTARTS.fd")" "fd8-closed"
+
+# A call that cannot get the lock in time refuses before it reads anything.
+LOCK="$is_core_dir/lattice-user.lock"
+exec 7>>"$LOCK"; flock -w 1 7
+line race-b.json vless "[$OWNER,$U1]"
+before=$(users_of race-b.json); : >"$RESTARTS"
+out=$(is_lattice_user_lock_wait=1; sb_user park race-b.json '{"name":"u_1111111111111111"}'); rc=$?
+chk "a park that cannot get the lock is refused" "$rc" "2"
+chk "as busy" "$(jq -r .error <<<"$out")" "busy"
+out=$(is_lattice_user_lock_wait=1; sb_user del race-b.json "$U1"); rc=$?
+chk "so is a del" "$rc/$(jq -r .error <<<"$out")" "2/busy"
+chk "having changed nothing" "$(users_of race-b.json)/$(parked_of race-b.json)/$(restarts)" "$before/none/0"
+out=$(sb_user parked race-b.json ""); rc=$?
+chk "listing parked users takes no lock" "$rc" "0"
+out=$(json_user_lock_available() { return 1; }; sb_user add race-b.json "$U2"); rc=$?
+chk "a node without flock runs the call unlocked, as before" "$rc/$(users_of race-b.json)" "0/[$OWNER,$U1,$U2]"
+exec 7>&-
+out=$(sb_user park race-b.json '{"name":"u_1111111111111111"}'); rc=$?
+chk "once the lock is free the park goes through" "$(jq -r '.results[0].state' <<<"$out")" "parked"
 
 REACHED_END=1
 echo
