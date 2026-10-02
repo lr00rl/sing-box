@@ -270,6 +270,40 @@ sb --json del <name>
 
 在 `--json` 模式下，如果命令需要交互输入但参数不完整，脚本会返回结构化错误，而不是进入 TTY 提问。
 
+### 线路用户（`user`）
+
+控制面通过这组命令增删、暂停和恢复某条线路上的单个用户。`<json>` 的字段按线路协议取用：
+vless/vmess 取 `name`、`uuid`、`flow`，tuic 取 `name`、`uuid`、`password`，trojan/hysteria2/anytls
+取 `name`、`password`，socks 取 `username`、`password`（socks 用户没有 `name` 字段，core 会拒绝它，
+所以 `name` 会被当作 `username` 写入）。
+
+```bash
+sb --json user add <line> '{"name":"u_0123456789abcdef","uuid":"..."}'
+sb --json user del <line> '{"name":"u_0123456789abcdef","uuid":"..."}'
+sb --json user del <line> '{"name":"u_0123456789abcdef"}'
+sb --json user park <line> '[{"name":"u_0123456789abcdef"},{"name":"u_fedcba9876543210"}]'
+sb --json user unpark <line> '{"name":"u_0123456789abcdef"}'
+sb --json user parked [line]
+sb --json caps
+```
+
+- `add` 先替换所有与 payload 任一字段（name、uuid、username、password）相同的条目，再追加这个用户。
+  带凭据的 `del` 删除所有这样的条目。两者都返回 `user_count_before`、`user_count_after` 和 `matched`
+  （命中的条目数），`matched` 大于 1 说明这次调用动到了别人的条目。
+- `del` 也可以只给用户名：只按名字匹配，名字对应多个条目时拒绝（`ambiguous_user`），不猜。
+  线路上没有这个名字时什么也不改，也不重启。
+- `park` 把用户对象原样从 `conf/<line>` 移到 `lattice-parked/<line>`，凭据不丢；`unpark` 原样移回。
+  有用户名时只按用户名匹配，否则按凭据匹配，每个选择器最多命中一个条目。一次可传一个数组，整批只重启一次。
+  重复暂停或恢复不报错，结果里写明 `already_parked`、`already_active` 或 `absent`；什么都没变时不重启。
+  暂停副本与线路上同名条目不一致时报 `conflict`，由人处理。
+- 删除用户（按名字或按凭据）会一并删掉它的暂停副本，避免已撤销的用户被 `unpark` 带回来；
+  `add` 会丢弃同名的暂停副本。
+- socks、http、mixed 线路没有用户时，上游 sing-box 不做任何认证，谁都能用。`del` 和 `park`
+  拒绝删掉或暂停这类线路的最后一个用户（`last_user_open_proxy`）。
+- `user parked` 和 `list` 的线路 metadata（`parked_users`、`parked_names`，均为字符串）报告暂停中的用户。
+  只列出 Lattice 自己的 `u_<16 位十六进制>` 名字，其他用户只计数；凭据从不输出。
+- `caps` 返回 `{ok,script,caps:[...]}`。旧脚本没有这个命令，会以 `ok:false` 回答，即不具备这些能力。
+
 ### Lattice 身份元数据 sidecar
 
 节点与线路身份（`node_uuid`、`node_id`、每条线路的 `line_id` 等）保存在
@@ -311,6 +345,7 @@ sidecar 结构：
 - 节点配置：`/etc/sing-box/conf/*.json`
 - 节点连接地址 sidecar：`/etc/sing-box/conf/*.addr`
 - Lattice 身份元数据 sidecar：`/etc/sing-box/lattice-metadata.json`（在 `conf/` 之外，服务不解析）
+- 暂停中的线路用户：`/etc/sing-box/lattice-parked/<line>.json`（在 `conf/` 之外；目录 0700，文件 0600；`sb backup` 一并归档）
 - 日志目录：`/var/log/sing-box`
 - 命令入口：`/usr/local/bin/sing-box`、`/usr/local/bin/sb`
 - 备份目录：`/opt/lattice/.archive_backup/`

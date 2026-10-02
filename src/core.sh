@@ -2815,6 +2815,24 @@ cmd_json_user_parked() {
     exit 0
 }
 
+# caps -> {ok,script,caps:[...]}: what this script can do, so a control plane
+# picks a code path per node from what the node says instead of parsing a
+# version string. A script older than this command routes `caps` to `change`,
+# which fails it as unknown ({"ok":false,"error":"error",...}, exit 1); that
+# answer means none of the capabilities below.
+#   user-del-by-name       `user del` accepts a payload with only a user name
+#   user-park              `user park` and `user unpark`, batched, one restart
+#   user-parked-list       `user parked`, and parked_* keys in `list` metadata
+#   user-open-proxy-guard  del and park refuse to empty a socks/http/mixed line
+#   user-match-counts      user results carry matched
+#   user-socks-add         socks users are written without the name the core rejects
+cmd_json_caps() {
+    jq -nc --arg script "${is_sh_ver:-}" '{ok:true,script:$script,caps:[
+        "user-del-by-name","user-park","user-parked-list",
+        "user-open-proxy-guard","user-match-counts","user-socks-add"]}'
+    exit 0
+}
+
 # meta --json -> regenerate the Lattice sidecar in design-15 v2 shape from on-box
 # state, print it, and exit. Identity continuity: an existing v2 inbounds[].line_uuid
 # or a v1 lines{}.line_id is preserved per conf file; only lines with no identity
@@ -3306,7 +3324,7 @@ cmd_json_provision() {
 
 # backup [--json] -> archive the sing-box config DATA (config.json + conf/, incl.
 # per-node .json and .addr sidecars, plus the Lattice lattice-metadata.json
-# identity sidecar) to /opt/lattice/.archive_backup/ as a
+# identity sidecar and the lattice-parked/ user files) to /opt/lattice/.archive_backup/ as a
 # timestamped tarball. Works on any install — including nodes deployed by hand or
 # by the interactive script flow — because it archives whatever is on disk.
 cmd_backup() {
@@ -3524,6 +3542,9 @@ main() {
         ;;
     user)
         cmd_json_user "$2" "$3" "$4"
+        ;;
+    caps)
+        cmd_json_caps
         ;;
     meta)
         cmd_json_meta

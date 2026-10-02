@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # The line-user verbs a control plane drives on an adopted node: the guard that
-# keeps a socks, http or mixed line from ending up with no users, which upstream
-# sing-box serves to anyone. Functions are extracted from src/core.sh, so these
-# assertions run against the shipped code.
+# keeps a socks, http or mixed line from ending up with no users (upstream
+# sing-box serves such a line to anyone), the socks user shape, delete by name,
+# park and unpark, what the node reports about parked users, and caps.
+# Functions are extracted from src/core.sh, so these assertions run against the
+# shipped code.
 set -u
 CORE="$(cd "$(dirname "$0")/.." && pwd)/src/core.sh"
 TMP=$(mktemp -d /tmp/sb-user-park.XXXXXX)
@@ -41,7 +43,7 @@ restarts() { [ -f "$RESTARTS" ] && wc -l <"$RESTARTS" | tr -d ' ' || echo 0; }
 for f in json_resolve_config_file json_line_user_obj json_line_user_valid \
     json_write_config_atomically json_stats_allowlist_sync json_line_user_opens_proxy json_line_user_plan \
     json_parked_file json_parked_read json_parked_write json_parked_rename json_parked_summary \
-    cmd_json_user cmd_json_user_park cmd_json_user_parked json_node_obj; do
+    cmd_json_user cmd_json_user_park cmd_json_user_parked json_node_obj cmd_json_caps; do
     eval "$(extract_fn $f)"
 done
 eval "$(awk "/^json_line_user_matches_filter='/,/^'/" "$CORE")"
@@ -362,6 +364,13 @@ mkdir -p "$PARKED"; printf 'junk\n' >"$PARKED/hub-a.json"
 out=$(node_obj hub-a.json)
 chk "a damaged parked file is reported in the metadata" "$(jq -r .metadata.parked_error <<<"$out")" "parked_invalid"
 rm -f "$PARKED/hub-a.json"
+
+# --- 6. capabilities ---------------------------------------------------------
+out=$(is_sh_ver=v1.24.3-alpha.8; cmd_json_caps); rc=$?
+chk "caps answers" "$(jq -c '[.ok, .script]' <<<"$out")" '[true,"v1.24.3-alpha.8"]'
+chk "and names what this script does" "$(jq -c '.caps | sort' <<<"$out")" \
+    '["user-del-by-name","user-match-counts","user-open-proxy-guard","user-park","user-parked-list","user-socks-add"]'
+chk "the entry point routes caps" "$(awk '/^main\(\) \{/,/^\}/' "$CORE" | grep -A1 '^    caps)' | tail -1 | tr -d ' ')" "cmd_json_caps"
 
 REACHED_END=1
 echo
