@@ -2307,6 +2307,61 @@ json_line_user_matches_filter='
      or same_nonempty(.password; $user.password))
 '
 
+# The selector rule for the verbs that act on one known user (del by name, and
+# park and unpark): a selector carrying a user name matches on that name alone,
+# and only a selector without one falls back to the credential fields. The
+# credential match above removes every entry sharing any field, so a hand-added
+# entry that reuses a uuid or a password goes with it; matching by name keeps
+# such an entry safe. On socks, http and mixed the username is the user name,
+# because their users have no name field.
+json_line_user_select_defs='
+    def user_key($proto):
+        if ($proto == "socks" or $proto == "http" or $proto == "mixed") then (.username // "") else (.name // "") end;
+    def same_nonempty($a; $b): (($a // "") != "" and ($a // "") == ($b // ""));
+    def selects($s; $proto):
+        ($s | user_key($proto)) as $k
+        | if ($k | type) == "string" and $k != "" then user_key($proto) == $k
+          else same_nonempty(.uuid; $s.uuid) or same_nonempty(.username; $s.username) or same_nonempty(.password; $s.password)
+          end;
+'
+
+# json_line_user_plan <op> <raw_file> <parked-doc> <selectors-json-array>
+# Works out a by-selector change to one line without writing anything, and
+# prints {users, parked, results, error}: the line's new user list, the new
+# parked list, one result per selector, and an {error,message} that refuses the
+# whole call. A selector that names more than one entry is an error, never a
+# guess, because the caller cannot see the line and an over-match here removes
+# someone else's access.
+json_line_user_plan() {
+    local op="$1" raw_file="$2" parked="$3" sels="$4"
+    jq -c --arg op "$op" --argjson parked "$parked" --argjson sels "$sels" "$json_line_user_select_defs"'
+        (.inbounds[0].type // "") as $type
+        | def hits($list; $s): [range(0; $list | length) as $j | select($list[$j] | selects($s; $type)) | $j];
+          def drop($idx): [range(0; length) as $j | select(any($idx[]; . == $j) | not) | .[$j]];
+          def result_for($i; $s):
+              {selector:$i} + (($s | user_key($type)) as $k
+                  | if ($k | type) == "string" and ($k | test("^u_[0-9a-f]{16}$")) then {name:$k} else {} end);
+          reduce range(0; $sels | length) as $i
+              ({users:(.inbounds[0].users // []), parked:($parked.users // []), results:[], error:null};
+               if .error != null then . else
+                   $sels[$i] as $s
+                   | hits(.users; $s) as $a
+                   | hits(.parked | map(.user); $s) as $p
+                   | result_for($i; $s) as $r
+                   | if $op == "del" then
+                         if ($a | length) > 1 then
+                             .error = {error:"ambiguous_user", message:"the name matches \($a | length) users on this line; remove it by credential instead"}
+                         else
+                             .users |= drop($a) | .parked |= drop($p)
+                             | .results += [$r + {state:(if ($a | length) == 1 then "removed" elif ($p | length) > 0 then "removed_parked" else "absent" end)}]
+                         end
+                     else
+                         .error = {error:"invalid_action", message:"no plan for \($op)"}
+                     end
+               end)
+    ' "$raw_file"
+}
+
 json_write_config_atomically() {
     local raw_file="$1" filter="$2" user_json="$3"
     local tmp backup errf
@@ -2366,6 +2421,7 @@ cmd_json_user() {
     jq -e . >/dev/null <<<"$payload" || json_err "invalid_payload" "user payload must be valid json" 2
 
     local config_file resolve_out resolve_rc raw_file user_json filter count_before count_after stats_sync=ok
+    local by_name= plan plan_error write_arg changed=true
     resolve_out=$(json_resolve_config_file "$name")
     resolve_rc=$?
     if [[ $resolve_rc != 0 ]]; then
@@ -2377,11 +2433,27 @@ cmd_json_user() {
     [[ -f $raw_file ]] || json_err "not_found" "config file not found: $config_file" 2
     user_json=$(json_line_user_obj "$raw_file" "$payload") || json_err "payload_failed" "failed to derive sing-box user object" 2
     [[ $user_json != "null" && $user_json ]] || json_err "unsupported_protocol" "this line protocol does not support dashboard user mutation" 2
-    json_line_user_valid "$user_json" || json_err "invalid_user" "payload does not contain the credential required by this line" 2
+    if ! json_line_user_valid "$user_json"; then
+        # A user name alone is enough to delete. A deleted identity has no
+        # credential left to send, and matching by name cannot take a
+        # hand-added entry that happens to share a uuid or password. The name
+        # must pick out exactly one entry; the plan refuses otherwise.
+        [[ $op == "del" ]] && jq -e '[.name, .username] | any(type == "string" and . != "")' >/dev/null 2>&1 <<<"$user_json" ||
+            json_err "invalid_user" "payload does not contain the credential required by this line" 2
+        by_name=1
+    fi
+    write_arg=$user_json
 
     count_before=$(jq '(.inbounds[0].users // []) | length' "$raw_file" 2>/dev/null)
     [[ $count_before =~ ^[0-9]+$ ]] || count_before=0
-    if [[ $op == "add" ]]; then
+    if [[ $by_name ]]; then
+        plan=$(json_line_user_plan del "$raw_file" '{"users":[]}' "[$user_json]") || json_err "jq_failed" "failed to plan the removal" 2
+        plan_error=$(jq -c '.error // empty' <<<"$plan")
+        [[ $plan_error ]] && json_err "$(jq -r .error <<<"$plan_error")" "$(jq -r .message <<<"$plan_error")" 2
+        write_arg=$(jq -c .users <<<"$plan")
+        [[ $write_arg == "$(jq -c '.inbounds[0].users // []' "$raw_file")" ]] && changed=false
+        filter='.inbounds[0].users = $user'
+    elif [[ $op == "add" ]]; then
         filter='
             .inbounds[0].users = (((.inbounds[0].users // []) | map(select(('"$json_line_user_matches_filter"') | not))) + [$user])
         '
@@ -2391,11 +2463,16 @@ cmd_json_user() {
         '
     fi
     if [[ $op == "del" ]]; then
-        count_after=$(jq --argjson user "$user_json" "$filter"' | (.inbounds[0].users // []) | length' "$raw_file" 2>/dev/null)
+        count_after=$(jq --argjson user "$write_arg" "$filter"' | (.inbounds[0].users // []) | length' "$raw_file" 2>/dev/null)
         json_line_user_opens_proxy "$raw_file" "$count_before" "${count_after:-0}" &&
             json_err "last_user_open_proxy" "removing the last user of a socks, http or mixed line would leave it open to anyone; add another user first, or delete the line" 2
     fi
-    json_write_config_atomically "$raw_file" "$filter" "$user_json"
+    # A by-name removal of a user the line does not hold changes nothing, and
+    # restarting would drop every connection on the node for no reason. Every
+    # other call keeps its old shape: write, sync, restart.
+    if [[ $changed == true ]]; then
+        json_write_config_atomically "$raw_file" "$filter" "$write_arg"
+    fi
     count_after=$(jq '(.inbounds[0].users // []) | length' "$raw_file" 2>/dev/null)
     [[ $count_after =~ ^[0-9]+$ ]] || count_after=0
     # Before the restart, so the new user list and the counter allowlist reach
@@ -2407,11 +2484,20 @@ cmd_json_user() {
     # counters are the smaller problem by a wide margin, so warn and carry on;
     # the caller learns about it from stats_allowlist_stale in the result.
     stats_sync=ok
-    json_stats_allowlist_sync || stats_sync=stale
-    manage restart "$is_core" >/dev/null 2>&1 || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
+    if [[ $changed == true ]]; then
+        json_stats_allowlist_sync || stats_sync=stale
+        manage restart "$is_core" >/dev/null 2>&1 || json_err "restart_failed" "configuration changed but sing-box restart failed" 1
+    fi
+    # matched is how many entries the payload hit: del removes every one of
+    # them, add replaces every one and appends its own. More than one means
+    # the call took entries that were not the caller's, which the counts let
+    # a control plane see after the fact.
     jq -nc --arg action "$op" --arg line "$config_file" --argjson before "$count_before" --argjson after "$count_after" \
         --argjson stale "$([ "$stats_sync" = stale ] && echo true || echo false)" \
-        '{ok:true,action:$action,line:$line,user_count_before:$before,user_count_after:$after}
+        --argjson by_name "$([ "$by_name" ] && echo true || echo false)" --argjson changed "$changed" \
+        '{ok:true,action:$action,line:$line,user_count_before:$before,user_count_after:$after,
+          matched:(if $action == "add" then $before - $after + 1 else $before - $after end)}
+         + (if $by_name then {match:"name",changed:$changed} else {} end)
          + (if $stale then {stats_allowlist_stale:true} else {} end)'
     exit 0
 }

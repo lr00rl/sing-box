@@ -39,10 +39,11 @@ manage() { echo x >>"$RESTARTS"; }
 restarts() { [ -f "$RESTARTS" ] && wc -l <"$RESTARTS" | tr -d ' ' || echo 0; }
 
 for f in json_resolve_config_file json_line_user_obj json_line_user_valid \
-    json_write_config_atomically json_stats_allowlist_sync json_line_user_opens_proxy cmd_json_user; do
+    json_write_config_atomically json_stats_allowlist_sync json_line_user_opens_proxy json_line_user_plan cmd_json_user; do
     eval "$(extract_fn $f)"
 done
 eval "$(awk "/^json_line_user_matches_filter='/,/^'/" "$CORE")"
+eval "$(awk "/^json_line_user_select_defs='/,/^'/" "$CORE")"
 
 # line <file> <type> <users-json>
 line() {
@@ -93,6 +94,60 @@ chk "and writes no name field" "$(jq -c '.inbounds[0].users[-1]' "$is_conf_dir/s
     '{"username":"u_0123456789abcdef","password":"pw-lattice"}'
 out=$(sb_user add socks-1081.json '{"name":"u_1111111111111111","password":"pw-only-name"}'); rc=$?
 chk "a name with no username becomes the username" "$(jq -r '.inbounds[0].users[-1].username' "$is_conf_dir/socks-1081.json")" "u_1111111111111111"
+
+# --- 3. delete by name alone -------------------------------------------------
+# The owner's entry has no name; a hand-added entry reuses Lattice's uuid.
+OWNER='{"uuid":"11111111-1111-4111-8111-111111111111","flow":"xtls-rprx-vision"}'
+LATT='{"name":"u_aaaaaaaaaaaaaaaa","uuid":"22222222-2222-4222-8222-222222222222"}'
+TWIN='{"name":"hand-added","uuid":"22222222-2222-4222-8222-222222222222"}'
+line hub-a.json vless "[$OWNER,$LATT,$TWIN]"
+: >"$RESTARTS"
+out=$(sb_user del hub-a.json '{"name":"u_aaaaaaaaaaaaaaaa"}'); rc=$?
+chk "a name alone removes a user" "$rc" "0"
+chk "only that user" "$(users_of hub-a.json)" "[$OWNER,$TWIN]"
+chk "the result says it matched by name" "$(jq -r .match <<<"$out")" "name"
+chk "and counts one match" "$(jq -c '[.user_count_before,.user_count_after,.matched]' <<<"$out")" "[3,2,1]"
+chk "one restart" "$(restarts)" "1"
+
+: >"$RESTARTS"
+out=$(sb_user del hub-a.json '{"name":"u_bbbbbbbbbbbbbbbb"}'); rc=$?
+chk "a name the line does not hold is not an error" "$rc" "0"
+chk "it reports no change" "$(jq -c '[.changed,.matched]' <<<"$out")" "[false,0]"
+chk "and does not restart the node" "$(restarts)" "0"
+chk "the line is untouched" "$(users_of hub-a.json)" "[$OWNER,$TWIN]"
+
+line hub-b.json vless '[{"name":"dup","uuid":"33333333-3333-4333-8333-333333333333"},{"name":"dup","uuid":"44444444-4444-4444-8444-444444444444"}]'
+before=$(users_of hub-b.json); : >"$RESTARTS"
+out=$(sb_user del hub-b.json '{"name":"dup"}'); rc=$?
+chk "a name held by two entries is refused" "$rc" "2"
+chk "as ambiguous" "$(jq -r .error <<<"$out")" "ambiguous_user"
+chk "with both entries kept" "$(users_of hub-b.json)" "$before"
+chk "and no restart" "$(restarts)" "0"
+
+# The credential path is unchanged: it still takes every entry sharing a field,
+# and the counts say so.
+line hub-c.json vless "[$OWNER,$LATT,$TWIN]"
+out=$(sb_user del hub-c.json "$LATT"); rc=$?
+chk "a credential delete still removes every match" "$(users_of hub-c.json)" "[$OWNER]"
+chk "and reports both" "$(jq -c '[.user_count_before,.user_count_after,.matched]' <<<"$out")" "[3,1,2]"
+chk "with no by-name fields" "$(jq -c '[has("match"),has("changed")]' <<<"$out")" "[false,false]"
+out=$(sb_user add hub-c.json "$LATT"); rc=$?
+chk "an add that matches nothing counts zero" "$(jq -c '[.user_count_before,.user_count_after,.matched]' <<<"$out")" "[1,2,0]"
+out=$(sb_user add hub-c.json '{"name":"u_aaaaaaaaaaaaaaaa","uuid":"55555555-5555-4555-8555-555555555555"}'); rc=$?
+chk "an add that replaces one counts one" "$(jq -c '[.user_count_before,.user_count_after,.matched]' <<<"$out")" "[2,2,1]"
+
+out=$(sb_user add hub-c.json '{"name":"u_cccccccccccccccc"}'); rc=$?
+chk "an add still needs a credential" "$(jq -r .error <<<"$out")" "invalid_user"
+out=$(sb_user del hub-c.json '{"flow":"xtls-rprx-vision"}'); rc=$?
+chk "a del with neither a name nor a credential is refused" "$(jq -r .error <<<"$out")" "invalid_user"
+
+# On socks the username is the name, and the open-proxy guard still holds.
+line socks-1082.json socks '[{"username":"owner","password":"pw-owner"},{"username":"u_0123456789abcdef","password":"pw-l"}]'
+out=$(sb_user del socks-1082.json '{"name":"u_0123456789abcdef"}'); rc=$?
+chk "a socks user is removed by its name" "$(users_of socks-1082.json)" '[{"username":"owner","password":"pw-owner"}]'
+line socks-1083.json socks '[{"username":"u_0123456789abcdef","password":"pw-l"}]'
+out=$(sb_user del socks-1083.json '{"name":"u_0123456789abcdef"}'); rc=$?
+chk "but not when it is the last one" "$(jq -r .error <<<"$out")" "last_user_open_proxy"
 
 REACHED_END=1
 echo
