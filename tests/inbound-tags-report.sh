@@ -19,6 +19,9 @@ chk() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: got [$2] want [$3]"; fi;
 
 extract_fn() { awk "/^$1\\(\\) \\{/,/^\\}/" "$CORE"; }
 eval "$(extract_fn json_node_obj)"
+eval "$(extract_fn json_parked_file)"
+eval "$(extract_fn json_parked_read)"
+eval "$(extract_fn json_parked_summary)"
 
 # --- stubs: json_node_obj reads vars that `info <file>` would have filled -----
 is_conf_dir="$TMP/conf"; mkdir -p "$is_conf_dir"

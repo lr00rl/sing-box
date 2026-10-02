@@ -1976,8 +1976,21 @@ json_node_obj() {
     # not from the config; emitted shape stays identical for machine consumers.
     local lattice_obj
     lattice_obj=$(lattice_meta_obj_for "$is_config_name" "$raw_file")
+    # Parked users, so the agent reports suspension as observed on the node
+    # rather than as the control plane last asked for it. Strings only: the
+    # agent decodes this map as map[string]string, and one non-string value
+    # would fail the whole list.
+    local parked_meta='{}' parked_doc
+    if [[ -e $(json_parked_file "$is_config_name") ]]; then
+        if parked_doc=$(json_parked_read "$is_config_name"); then
+            parked_meta=$(json_parked_summary <<<"$parked_doc" | jq -c '
+                if .parked_users > 0 then {parked_users:(.parked_users | tostring), parked_names:(.parked_names | tojson)} else {} end')
+        else
+            parked_meta='{"parked_error":"parked_invalid"}'
+        fi
+    fi
     if [[ -f $raw_file ]]; then
-        enrich=$(jq -c --arg tag "$is_config_name" --argjson lat "$lattice_obj" \
+        enrich=$(jq -c --arg tag "$is_config_name" --argjson lat "$lattice_obj" --argjson parked "$parked_meta" \
             --argjson maps "$(route_maps_json)" '
             def compact_obj:
                 with_entries(select(.value != "" and .value != null and .value != [] and .value != {}));
@@ -2010,7 +2023,8 @@ json_node_obj() {
                + (if ($tags | length) > 0 then {inbound_tags:($tags | tojson)} else {} end)
                + (if ($users | length) > 0
                   then {named_users:($named | tostring), unnamed_users:(($users | length) - $named | tostring)}
-                  else {} end)) as $metadata
+                  else {} end)
+               + ($parked // {})) as $metadata
             | ({
                 line_id:($lattice.line_id // ""),
                 node_identity_uuid:($lattice.node_uuid // ""),
@@ -2525,15 +2539,26 @@ json_parked_rename() {
     mv "$from" "$to"
 }
 
+# Summarise a parked document on stdin as {parked_users, parked_names}. Every
+# parked user is counted; only Lattice's own u_<16 hex> names are listed, since
+# a hand-made name may be a person's and these lines leave the node.
+json_parked_summary() {
+    jq -c '[.users[].user | (.name // .username // "")] as $n
+        | {parked_users:($n | length),
+           parked_names:[$n[] | select(type == "string" and test("^u_[0-9a-f]{16}$"))]}'
+}
+
 # user add|del <line> <payload-json> -> mutate one inbound's user list.
 # user park|unpark <line> <payload-json|array> -> see cmd_json_user_park.
+# user parked [line] -> see cmd_json_user_parked.
 cmd_json_user() {
     is_json_out=1
     local op="$1" name="$2" payload="$3"
     case $op in
     add | del) ;;
     park | unpark) cmd_json_user_park "$op" "$name" "$payload" ;;
-    *) json_err "invalid_action" "user action must be add, del, park or unpark" 2 ;;
+    parked) cmd_json_user_parked "$name" ;;
+    *) json_err "invalid_action" "user action must be add, del, park, unpark or parked" 2 ;;
     esac
     [[ $payload ]] || json_err "missing_payload" "user payload json is required" 2
     jq -e . >/dev/null <<<"$payload" || json_err "invalid_payload" "user payload must be valid json" 2
@@ -2760,6 +2785,33 @@ cmd_json_user_park() {
           parked_count_before:$pbefore,parked_count_after:$pafter,results:$results}
          + (if $stale then {stats_allowlist_stale:true} else {} end)
          + (if $pstale then {parked_stale:true} else {} end)'
+    exit 0
+}
+
+# user parked [line] -> {ok,count,lines:[{line,parked_users,parked_names}]}
+# Every line with parked users, or the one line asked about. A parked file whose
+# line no longer exists is listed with orphaned:true and a damaged one with
+# error:"parked_invalid", so neither can hide a credential left on the node.
+cmd_json_user_parked() {
+    local name="$1" dir entries= f doc out lines=
+    if [[ $name ]]; then
+        entries=$(json_resolve_config_file "$name") || { printf '%s\n' "$entries"; exit 2; }
+    else
+        dir=$(json_parked_file "")
+        [[ -d $dir ]] && entries=$(ls "$dir" 2>/dev/null | grep -E '\.json$')
+    fi
+    while IFS= read -r f; do
+        [[ $f ]] || continue
+        if doc=$(json_parked_read "$f"); then
+            out=$(json_parked_summary <<<"$doc" | jq -c --arg line "$f" \
+                --argjson orphaned "$([[ -f $is_conf_dir/$f ]] && echo false || echo true)" \
+                '{line:$line} + . + (if $orphaned then {orphaned:true} else {} end)')
+        else
+            out=$(jq -nc --arg line "$f" '{line:$line,error:"parked_invalid"}')
+        fi
+        lines+="$out"$'\n'
+    done <<<"$entries"
+    printf '%s' "$lines" | jq -sc '{ok:true,count:length,lines:.}'
     exit 0
 }
 

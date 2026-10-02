@@ -40,7 +40,8 @@ restarts() { [ -f "$RESTARTS" ] && wc -l <"$RESTARTS" | tr -d ' ' || echo 0; }
 
 for f in json_resolve_config_file json_line_user_obj json_line_user_valid \
     json_write_config_atomically json_stats_allowlist_sync json_line_user_opens_proxy json_line_user_plan \
-    json_parked_file json_parked_read json_parked_write json_parked_rename cmd_json_user cmd_json_user_park; do
+    json_parked_file json_parked_read json_parked_write json_parked_rename json_parked_summary \
+    cmd_json_user cmd_json_user_park cmd_json_user_parked json_node_obj; do
     eval "$(extract_fn $f)"
 done
 eval "$(awk "/^json_line_user_matches_filter='/,/^'/" "$CORE")"
@@ -315,6 +316,52 @@ printf '%s\n' '{"schema":"lattice.singbox-parked.v1","users":[{"user":{"name":"u
 json_parked_rename old-name.json new-name.json 2>/dev/null
 chk "but not over another line's" "$(jq -r '.users[0].user.name' "$PARKED/new-name.json")/$( [ -f "$PARKED/old-name.json" ] && echo kept)" "u_7/kept"
 rm -f "$PARKED/old-name.json" "$PARKED/new-name.json"
+
+# --- 5. what the node reports about parked users -----------------------------
+rm -rf "$PARKED"
+line rep-a.json vless "[$OWNER,$U1,$U2]"
+line rep-b.json trojan '[{"password":"owner-pw"},{"name":"alice","password":"alice-pw"},{"name":"u_aaaaaaaaaaaaaaab","password":"l-pw"}]'
+out=$(sb_user park rep-a.json "[{\"name\":\"u_1111111111111111\"},{\"name\":\"u_2222222222222222\"}]")
+out=$(sb_user park rep-b.json '[{"name":"alice"},{"name":"u_aaaaaaaaaaaaaaab"}]')
+# main passes three arguments, empty when absent; so does every call here.
+out=$(sb_user parked "" ""); rc=$?
+chk "user parked lists every line with parked users" "$(jq -c '[.count, [.lines[].line]]' <<<"$out")" '[2,["rep-a.json","rep-b.json"]]'
+chk "with a count and Lattice's names" "$(jq -c '.lines[0] | [.parked_users, .parked_names]' <<<"$out")" '[2,["u_1111111111111111","u_2222222222222222"]]'
+chk "a hand-made name is counted but not listed" "$(jq -c '.lines[1] | [.parked_users, .parked_names]' <<<"$out")" '[2,["u_aaaaaaaaaaaaaaab"]]'
+chk "and no credential leaves the node" "$(grep -c 'pw\|6666-' <<<"$out")" "0"
+out=$(sb_user parked hub-a.json "")
+chk "one line with nothing parked reports zero" "$(jq -c '.lines[0] | [.line, .parked_users, .parked_names]' <<<"$out")" '["hub-a.json",0,[]]'
+cp "$PARKED/rep-a.json" "$PARKED/gone.json"; printf 'junk\n' >"$PARKED/broken.json"
+out=$(sb_user parked "" "")
+chk "a parked file whose line is gone is marked orphaned" "$(jq -c '[.lines[] | select(.line == "gone.json") | .orphaned]' <<<"$out")" '[true]'
+chk "a damaged one is marked, not skipped" "$(jq -c '[.lines[] | select(.line == "broken.json") | .error]' <<<"$out")" '["parked_invalid"]'
+rm -f "$PARKED/gone.json" "$PARKED/broken.json"
+rm -rf "$PARKED"; out=$(sb_user parked "" "")
+chk "no parked directory is an empty list" "$out" '{"ok":true,"count":0,"lines":[]}'
+line rep-a.json vless "[$OWNER,$U1,$U2]"
+out=$(sb_user park rep-a.json '{"name":"u_1111111111111111"}')
+
+# `sb --json list` carries the same summary in the line metadata, which the
+# agent forwards as map[string]string: every value must be a string.
+node_obj() (
+    is_config_name=$1; is_protocol=vless; net=tcp; is_addr=203.0.113.7; port=443
+    is_https_port=""; host=""; path=""; uuid=""; password=""; ss_password=""
+    ss_method=""; is_servername=""; is_public_key=""; is_url=""
+    lattice_meta_obj_for() { printf '{}\n'; }
+    route_maps_json() { printf '{"routes":{},"types":{}}'; }
+    json_node_obj
+)
+out=$(node_obj rep-a.json)
+chk "list metadata counts parked users" "$(jq -r .metadata.parked_users <<<"$out")" "1"
+chk "and names them as a JSON string" "$(jq -r .metadata.parked_names <<<"$out")" '["u_1111111111111111"]'
+chk "every metadata value is a string" "$(jq '[.metadata[] | type] | unique' -c <<<"$out")" '["string"]'
+chk "user_count is the active users only" "$(jq -r .user_count <<<"$out")" "2"
+out=$(node_obj hub-a.json)
+chk "a line with nothing parked has no parked keys" "$(jq -c '.metadata | [has("parked_users"), has("parked_names")]' <<<"$out")" "[false,false]"
+mkdir -p "$PARKED"; printf 'junk\n' >"$PARKED/hub-a.json"
+out=$(node_obj hub-a.json)
+chk "a damaged parked file is reported in the metadata" "$(jq -r .metadata.parked_error <<<"$out")" "parked_invalid"
+rm -f "$PARKED/hub-a.json"
 
 REACHED_END=1
 echo
