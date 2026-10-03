@@ -310,6 +310,7 @@ sb --json caps
   只列出 Lattice 自己的 `u_<16 位十六进制>` 名字，其他用户只计数；凭据从不输出。
 - `add`、`del`、`park`、`unpark` 在一台节点上一次只跑一个：先用 flock(1) 拿到
   `/etc/sing-box/lattice-user.lock`，最多等 20 秒，拿不到就报 `busy`（退出码 2），什么都不读也不改。
+  只用 `flock -n` 轮询，所以 util-linux 和 busybox（Alpine）的 flock 都能用；busybox 的 flock 没有 `-w`。
   锁挂在打开的文件描述符上，调用退出或被杀时由内核释放，不会留下死锁；重启 core 时不把这个描述符交给子进程。
   节点上没有 flock 时照旧不加锁运行，`caps` 也不列出 `user-lock`，这时控制面要自己把对这台节点的调用错开。
 - `caps` 返回 `{ok,script,caps:[...]}`。旧脚本没有这个命令，会以 `ok:false` 回答，即不具备这些能力。

@@ -2565,15 +2565,21 @@ json_user_lock_available() {
     command -v flock >/dev/null 2>&1
 }
 
-# Takes the node's user lock on fd 8 for the rest of the process. It waits up to
-# is_lattice_user_lock_wait seconds (20 by default, inside the 30 s a Lattice
-# task gets), then refuses with busy, before reading or changing anything.
+# Takes the node's user lock on fd 8 for the rest of the process. It keeps
+# trying for is_lattice_user_lock_wait seconds (20 by default, inside the 30 s a
+# Lattice task gets), then refuses with busy, before reading or changing
+# anything. It polls with -n instead of waiting with -w because busybox's
+# flock, the one Alpine has, accepts only -s, -x, -u and -n.
 json_user_lock() {
-    local lock="${is_lattice_user_lock:-${is_conf_dir%/*}/lattice-user.lock}"
+    local lock="${is_lattice_user_lock:-${is_conf_dir%/*}/lattice-user.lock}" end
     json_user_lock_available || return 0
     exec 8>>"$lock" || json_err "lock_failed" "cannot open the user lock $lock" 2
-    flock -w "${is_lattice_user_lock_wait:-20}" 8 ||
-        json_err "busy" "another sb user call on this node holds the user lock; nothing was changed, try again" 2
+    end=$((SECONDS + ${is_lattice_user_lock_wait:-20}))
+    until flock -n 8 2>/dev/null; do
+        [[ $SECONDS -lt $end ]] ||
+            json_err "busy" "another sb user call on this node holds the user lock; nothing was changed, try again" 2
+        sleep 0.2 2>/dev/null || sleep 1
+    done
 }
 
 # user add|del <line> <payload-json> -> mutate one inbound's user list.

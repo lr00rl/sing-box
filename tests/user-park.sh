@@ -44,20 +44,18 @@ manage() {
 }
 restarts() { [ -f "$RESTARTS" ] && wc -l <"$RESTARTS" | tr -d ' ' || echo 0; }
 
-# flock(1) is util-linux and macOS has none. Stand in with perl's flock(2) on
-# the inherited descriptor: the lock belongs to the open file, so it outlives
-# perl and lasts while the shell holds fd 8, exactly as with the real command.
-if ! command -v flock >/dev/null 2>&1; then
-    flock() {
-        [ "$1" = -w ] || return 2
-        perl -MFcntl=:flock -e '
-            my ($wait, $fd) = @ARGV;
-            open(my $fh, ">>&=", $fd) or exit 2;
-            my $end = time + $wait;
-            until (flock($fh, LOCK_EX | LOCK_NB)) { exit 1 if time >= $end; select(undef, undef, undef, 0.05); }
-            exit 0;' "$2" "$3"
-    }
-fi
+# flock(1) comes from util-linux or busybox, and macOS has neither. This stand-in
+# is used everywhere, even where a real flock exists, because it accepts only
+# what busybox's does (-s, -x, -u, -n; no -w): a script that reached for a
+# util-linux-only option would refuse every call on an Alpine node, and this
+# suite should fail first. `flock -n FD` uses perl's flock(2) on the inherited
+# descriptor: the lock belongs to the open file, so it outlives perl and lasts
+# while the shell holds the descriptor, as with the real command.
+flock() {
+    case $1 in -s | -x | -u | -n) ;; *) echo "flock: unrecognized option: $1" >&2; return 1 ;; esac
+    [ "$1" = -n ] || return 2
+    perl -MFcntl=:flock -e 'open(my $fh, ">>&=", $ARGV[0]) or exit 2; flock($fh, LOCK_EX | LOCK_NB) or exit 1' "$2"
+}
 
 for f in json_resolve_config_file json_line_user_obj json_line_user_valid \
     json_write_config_atomically json_stats_allowlist_sync json_line_user_opens_proxy json_line_user_plan \
@@ -464,7 +462,7 @@ chk "no restart in this suite was handed the lock's descriptor" "$(sort -u "$RES
 
 # A call that cannot get the lock in time refuses before it reads anything.
 LOCK="$is_core_dir/lattice-user.lock"
-exec 7>>"$LOCK"; flock -w 1 7
+exec 7>>"$LOCK"; flock -n 7
 line race-b.json vless "[$OWNER,$U1]"
 before=$(users_of race-b.json); : >"$RESTARTS"
 out=$(is_lattice_user_lock_wait=1; sb_user park race-b.json '{"name":"u_1111111111111111"}'); rc=$?
