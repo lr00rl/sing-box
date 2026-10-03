@@ -270,6 +270,51 @@ sb --json del <name>
 
 在 `--json` 模式下，如果命令需要交互输入但参数不完整，脚本会返回结构化错误，而不是进入 TTY 提问。
 
+### 线路用户（`user`）
+
+控制面通过这组命令增删、暂停和恢复某条线路上的单个用户。`<json>` 的字段按线路协议取用：
+vless/vmess 取 `name`、`uuid`、`flow`，tuic 取 `name`、`uuid`、`password`，trojan/hysteria2/anytls
+取 `name`、`password`，socks 取 `username`、`password`（socks 用户没有 `name` 字段，core 会拒绝它，
+所以 `name` 会被当作 `username` 写入）。
+
+```bash
+sb --json user add <line> '{"name":"u_0123456789abcdef","uuid":"..."}'
+sb --json user del <line> '{"name":"u_0123456789abcdef","uuid":"..."}'
+sb --json user del <line> '{"name":"u_0123456789abcdef"}'
+sb --json user park <line> '[{"name":"u_0123456789abcdef"},{"name":"u_fedcba9876543210"}]'
+sb --json user unpark <line> '{"name":"u_0123456789abcdef"}'
+sb --json user parked [line]
+sb --json caps
+```
+
+- `add` 先替换所有与 payload 任一字段（name、uuid、username、password）相同的条目，再追加这个用户。
+  带凭据的 `del` 删除所有这样的条目。两者都返回 `user_count_before`、`user_count_after` 和 `matched`
+  （命中的条目数），`matched` 大于 1 说明这次调用动到了别人的条目。
+  带凭据的 `del` 即使同时给了名字也这样匹配，因为它是撤销：与这个用户共用 uuid 或密码的条目用的是同一个凭据，
+  留下它就等于没撤销。
+- `del` 也可以只给用户名：只按名字匹配，名字对应多个条目时拒绝（`ambiguous_user`），不猜。
+  线路上没有这个名字时什么也不改，也不重启。共用凭据的手工条目会留下，那个凭据也就仍能通过它连上；
+  要保留这类条目时用它，要彻底撤销凭据时用带凭据的 `del`。
+- `park` 把用户对象原样从 `conf/<line>` 移到 `lattice-parked/<line>`，凭据不丢；`unpark` 原样移回。
+  有用户名时只按用户名匹配，否则按凭据匹配，每个选择器最多命中一个条目。一次可传一个数组，整批只重启一次。
+  重复暂停或恢复不报错，结果里写明 `already_parked`、`already_active` 或 `absent`；什么都没变时不重启。
+  暂停副本与线路上同名条目不一致时报 `conflict`，由人处理。
+- 删除用户（按名字或按凭据）会一并删掉它的暂停副本，避免已撤销的用户被 `unpark` 带回来；
+  `add` 会丢弃同名的暂停副本。暂停副本删不掉时（例如磁盘写满），`del` 照样先从线路上撤销并重启，
+  但返回 `ok:false`、`error:"parked_stale"`、退出码 1，调用方应当重试，重试会补删暂停副本。
+  `add` 遇到同样情况仍然成功，只带 `parked_stale:true`：留下的是这个用户的旧凭据，`unpark` 会以 `conflict` 拒绝它。
+- socks、http、mixed 线路没有用户时，上游 sing-box 不做任何认证，谁都能用。`del` 和 `park`
+  拒绝删掉或暂停这类线路的最后一个用户（`last_user_open_proxy`）。
+- `user parked` 和 `list` 的线路 metadata（`parked_users`、`parked_names`，均为字符串）报告暂停中的用户。
+  `user parked` 不带线路时列出所有有暂停用户的线路；带线路时总是返回那一条，没有暂停用户就报 0。
+  只列出 Lattice 自己的 `u_<16 位十六进制>` 名字，其他用户只计数；凭据从不输出。
+- `add`、`del`、`park`、`unpark` 在一台节点上一次只跑一个：先用 flock(1) 拿到
+  `/etc/sing-box/lattice-user.lock`，最多等 20 秒，拿不到就报 `busy`（退出码 2），什么都不读也不改。
+  只用 `flock -n` 轮询，所以 util-linux 和 busybox（Alpine）的 flock 都能用；busybox 的 flock 没有 `-w`。
+  锁挂在打开的文件描述符上，调用退出或被杀时由内核释放，不会留下死锁；重启 core 时不把这个描述符交给子进程。
+  节点上没有 flock 时照旧不加锁运行，`caps` 也不列出 `user-lock`，这时控制面要自己把对这台节点的调用错开。
+- `caps` 返回 `{ok,script,caps:[...]}`。旧脚本没有这个命令，会以 `ok:false` 回答，即不具备这些能力。
+
 ### Lattice 身份元数据 sidecar
 
 节点与线路身份（`node_uuid`、`node_id`、每条线路的 `line_id` 等）保存在
@@ -311,6 +356,8 @@ sidecar 结构：
 - 节点配置：`/etc/sing-box/conf/*.json`
 - 节点连接地址 sidecar：`/etc/sing-box/conf/*.addr`
 - Lattice 身份元数据 sidecar：`/etc/sing-box/lattice-metadata.json`（在 `conf/` 之外，服务不解析）
+- 暂停中的线路用户：`/etc/sing-box/lattice-parked/<line>.json`（在 `conf/` 之外；目录 0700，文件 0600；`sb backup` 一并归档）
+- 线路用户锁：`/etc/sing-box/lattice-user.lock`（空文件，只供 flock 使用）
 - 日志目录：`/var/log/sing-box`
 - 命令入口：`/usr/local/bin/sing-box`、`/usr/local/bin/sb`
 - 备份目录：`/opt/lattice/.archive_backup/`

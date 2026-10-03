@@ -112,6 +112,11 @@ is_config_json=$is_core_dir/config.json
 # the service loads config.json (-c) plus every conf/*.json (-C) with
 # DisallowUnknownFields, so identity metadata cannot live inside those configs.
 is_lattice_meta=$is_core_dir/lattice-metadata.json
+# Users parked off a line by `sb user park`, one file per line, kept outside
+# conf/ for the same reason. They hold credentials: directory 0700, files 0600.
+is_lattice_parked_dir=$is_core_dir/lattice-parked
+# flock(1) target that lets one `sb user add|del|park|unpark` run at a time.
+is_lattice_user_lock=$is_core_dir/lattice-user.lock
 is_caddy_bin=/usr/local/bin/caddy
 is_caddy_dir=/etc/caddy
 is_caddy_repo=caddyserver/caddy
