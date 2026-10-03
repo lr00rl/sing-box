@@ -2650,6 +2650,12 @@ cmd_json_user() {
             .inbounds[0].users = (((.inbounds[0].users // []) | map(select(('"$json_line_user_matches_filter"') | not))) + [$user])
         '
     else
+        # A del that carries a credential revokes that credential, so it takes
+        # every entry holding it, even when the payload also names the user: an
+        # entry sharing the uuid or the password admits the same client, and
+        # keeping it would keep the credential working. matched says how many
+        # went. A caller that must keep such an entry removes by name alone,
+        # and accepts that the credential still works through it.
         filter='
             .inbounds[0].users = ((.inbounds[0].users // []) | map(select(('"$json_line_user_matches_filter"') | not)))
         '
