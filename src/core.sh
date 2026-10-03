@@ -2850,28 +2850,36 @@ cmd_json_user_park() {
 }
 
 # user parked [line] -> {ok,count,lines:[{line,parked_users,parked_names}]}
-# Every line with parked users, or the one line asked about. A parked file whose
+# Every line with parked users, or the one line asked about, which is reported
+# even at zero so the answer always says something about it. A parked file whose
 # line no longer exists is listed with orphaned:true and a damaged one with
 # error:"parked_invalid", so neither can hide a credential left on the node.
 cmd_json_user_parked() {
-    local name="$1" dir entries= f doc out lines=
+    local name="$1" dir f doc out lines=
+    local -a entries=()
     if [[ $name ]]; then
-        entries=$(json_resolve_config_file "$name") || { printf '%s\n' "$entries"; exit 2; }
+        f=$(json_resolve_config_file "$name") || { printf '%s\n' "$f"; exit 2; }
+        entries=("$f")
     else
+        # A glob, not ls: the names come back whole whatever they contain.
         dir=$(json_parked_file "")
-        [[ -d $dir ]] && entries=$(ls "$dir" 2>/dev/null | grep -E '\.json$')
+        for f in "${dir%/}"/*.json; do
+            [[ -f $f ]] && entries+=("${f##*/}")
+        done
     fi
-    while IFS= read -r f; do
-        [[ $f ]] || continue
+    for f in ${entries[@]+"${entries[@]}"}; do
         if doc=$(json_parked_read "$f"); then
             out=$(json_parked_summary <<<"$doc" | jq -c --arg line "$f" \
                 --argjson orphaned "$([[ -f $is_conf_dir/$f ]] && echo false || echo true)" \
                 '{line:$line} + . + (if $orphaned then {orphaned:true} else {} end)')
+            # The script removes a parked file when its last user leaves, so a
+            # file with none is a hand-made leftover with nothing to report.
+            [[ ! $name ]] && jq -e '.parked_users == 0' >/dev/null <<<"$out" && continue
         else
             out=$(jq -nc --arg line "$f" '{line:$line,error:"parked_invalid"}')
         fi
         lines+="$out"$'\n'
-    done <<<"$entries"
+    done
     printf '%s' "$lines" | jq -sc '{ok:true,count:length,lines:.}'
     exit 0
 }

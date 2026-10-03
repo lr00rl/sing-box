@@ -395,6 +395,14 @@ out=$(sb_user parked "" "")
 chk "a parked file whose line is gone is marked orphaned" "$(jq -c '[.lines[] | select(.line == "gone.json") | .orphaned]' <<<"$out")" '[true]'
 chk "a damaged one is marked, not skipped" "$(jq -c '[.lines[] | select(.line == "broken.json") | .error]' <<<"$out")" '["parked_invalid"]'
 rm -f "$PARKED/gone.json" "$PARKED/broken.json"
+odd=$'odd\nname.json'
+cp "$PARKED/rep-a.json" "$PARKED/$odd"
+printf '%s\n' '{"schema":"lattice.singbox-parked.v1","users":[]}' >"$PARKED/empty.json"
+out=$(sb_user parked "" "")
+chk "a file name holding a newline is listed whole" "$(jq -c '[.lines[] | select(.line == "odd\nname.json") | .parked_users]' <<<"$out")" '[2]'
+chk "not as pieces" "$(jq -c '[.lines[].line | select(. == "odd" or . == "name.json")] | length' <<<"$out")" "0"
+chk "a parked file with no users is left out of the full list" "$(jq -c '[.lines[] | select(.line == "empty.json")] | length' <<<"$out")" "0"
+rm -f "$PARKED/$odd" "$PARKED/empty.json"
 rm -rf "$PARKED"; out=$(sb_user parked "" "")
 chk "no parked directory is an empty list" "$out" '{"ok":true,"count":0,"lines":[]}'
 line rep-a.json vless "[$OWNER,$U1,$U2]"

@@ -303,6 +303,7 @@ sb --json caps
 - socks、http、mixed 线路没有用户时，上游 sing-box 不做任何认证，谁都能用。`del` 和 `park`
   拒绝删掉或暂停这类线路的最后一个用户（`last_user_open_proxy`）。
 - `user parked` 和 `list` 的线路 metadata（`parked_users`、`parked_names`，均为字符串）报告暂停中的用户。
+  `user parked` 不带线路时列出所有有暂停用户的线路；带线路时总是返回那一条，没有暂停用户就报 0。
   只列出 Lattice 自己的 `u_<16 位十六进制>` 名字，其他用户只计数；凭据从不输出。
 - `add`、`del`、`park`、`unpark` 在一台节点上一次只跑一个：先用 flock(1) 拿到
   `/etc/sing-box/lattice-user.lock`，最多等 20 秒，拿不到就报 `busy`（退出码 2），什么都不读也不改。
